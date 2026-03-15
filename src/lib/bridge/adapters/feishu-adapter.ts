@@ -766,7 +766,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     if (permId) {
       // Use real card action buttons
-      const cardJson = buildPermissionButtonCard(mdText, permId);
+      const cardJson = buildPermissionButtonCard(mdText, permId, chatId);
 
       try {
         const res = await this.restClient.im.message.create({
@@ -780,7 +780,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         if (res?.data?.message_id) {
           return { ok: true, messageId: res.data.message_id };
         }
-        console.warn('[feishu-adapter] Permission button card send failed:', res?.msg);
+        console.warn('[feishu-adapter] Permission button card send failed:', JSON.stringify({ code: (res as any)?.code, msg: res?.msg }));
       } catch (err) {
         console.warn('[feishu-adapter] Permission button card error, falling back to text:', err instanceof Error ? err.message : err);
       }

@@ -179,58 +179,51 @@ export function buildFinalCardJson(
 
 /**
  * Build a permission card with real action buttons (column_set layout).
+ * Structure aligned with CodePilot's working Feishu outbound implementation.
  * Returns the card JSON string for msg_type: 'interactive'.
  */
 export function buildPermissionButtonCard(
   text: string,
   permissionRequestId: string,
+  chatId?: string,
 ): string {
+  const buttons = [
+    { label: 'Allow', type: 'primary', action: 'allow' },
+    { label: 'Allow Session', type: 'default', action: 'allow_session' },
+    { label: 'Deny', type: 'danger', action: 'deny' },
+  ];
+
+  const buttonColumns = buttons.map((btn) => ({
+    tag: 'column',
+    width: 'auto',
+    elements: [{
+      tag: 'button',
+      text: { tag: 'plain_text', content: btn.label },
+      type: btn.type,
+      size: 'medium',
+      value: { callback_data: `perm:${btn.action}:${permissionRequestId}`, ...(chatId ? { chatId } : {}) },
+    }],
+  }));
+
   return JSON.stringify({
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      template: 'orange',
-      title: { tag: 'plain_text', content: '🔐 Permission Required' },
+      title: { tag: 'plain_text', content: 'Permission Required' },
+      template: 'blue',
+      icon: { tag: 'standard_icon', token: 'lock-chat_filled' },
+      padding: '12px 12px 12px 12px',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: text },
+        { tag: 'markdown', content: text, text_size: 'normal' },
+        { tag: 'markdown', content: '⏱ This request will expire in 5 minutes', text_size: 'notation' },
         { tag: 'hr' },
         {
           tag: 'column_set',
-          flex_mode: 'flow',
-          columns: [
-            {
-              tag: 'column',
-              width: 'auto',
-              elements: [{
-                tag: 'button',
-                text: { tag: 'plain_text', content: 'Allow' },
-                type: 'primary',
-                value: { callback_data: `perm:allow:${permissionRequestId}` },
-              }],
-            },
-            {
-              tag: 'column',
-              width: 'auto',
-              elements: [{
-                tag: 'button',
-                text: { tag: 'plain_text', content: 'Allow Session' },
-                type: 'default',
-                value: { callback_data: `perm:allow_session:${permissionRequestId}` },
-              }],
-            },
-            {
-              tag: 'column',
-              width: 'auto',
-              elements: [{
-                tag: 'button',
-                text: { tag: 'plain_text', content: 'Deny' },
-                type: 'danger',
-                value: { callback_data: `perm:deny:${permissionRequestId}` },
-              }],
-            },
-          ],
+          flex_mode: 'none',
+          horizontal_align: 'left',
+          columns: buttonColumns,
         },
         { tag: 'hr' },
         {
