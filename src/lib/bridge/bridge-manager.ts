@@ -795,20 +795,23 @@ async function handleCommand(
   switch (command) {
     case '/start':
       response = [
-        '<b>CodePilot Bridge</b>',
+        '<b>BuddyBridge</b>',
         '',
-        'Send any message to interact with Claude.',
+        '发送任意消息即可与 Claude 交互。',
         '',
-        '<b>Commands:</b>',
-        '/new [path] - Start new session',
-        '/bind &lt;session_id&gt; - Bind to existing session',
-        '/cwd /path - Change working directory',
-        '/mode plan|code|ask - Change mode',
-        '/status - Show current status',
-        '/sessions - List recent sessions',
-        '/stop - Stop current session',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
-        '/help - Show this help',
+        '/new - 新建会话',
+        '/status - 查看当前状态',
+        '/stop - 停止当前会话',
+        '/cwd /path - 修改工作目录',
+        '/mode plan|code|ask - 切换模式',
+        '/prompt scopes|get|set|clear - 管理作用域 Prompt',
+        '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
+        // '/new [path] - 新建会话',
+        // '/bind &lt;session_id&gt; - 绑定已有会话',
+        // '/status - 查看当前状态',
+        // '/sessions - 查看最近会话',
+        // '/stop - 停止当前会话',
+        // '/help - 查看帮助',
       ].join('\n');
       break;
 
@@ -856,7 +859,11 @@ async function handleCommand(
 
     case '/cwd': {
       if (!args) {
-        response = 'Usage: /cwd /path/to/directory';
+        response = [
+          '请输入工作目录路径',
+          '',
+          '示例：<code>/cwd /home/user/projects</code>',
+        ].join('\n');
         break;
       }
       const validatedPath = validateWorkingDirectory(args);
@@ -872,7 +879,11 @@ async function handleCommand(
 
     case '/mode': {
       if (!validateMode(args)) {
-        response = 'Usage: /mode plan|code|ask';
+        response = [
+          '请指定模式：plan、code 或 ask',
+          '',
+          '示例：<code>/mode code</code>',
+        ].join('\n');
         break;
       }
       const binding = router.resolve(msg.address);
@@ -945,18 +956,20 @@ async function handleCommand(
 
     case '/help':
       response = [
-        '<b>CodePilot Bridge Commands</b>',
+        '<b>BuddyBridge 命令列表</b>',
         '',
-        '/new [path] - Start new session',
-        '/bind &lt;session_id&gt; - Bind to existing session',
-        '/cwd /path - Change working directory',
-        '/mode plan|code|ask - Change mode',
-        '/status - Show current status',
-        '/sessions - List recent sessions',
-        '/stop - Stop current session',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
-        '1/2/3 - Quick permission reply (Feishu/QQ, single pending)',
-        '/help - Show this help',
+        '/new - 新建会话',
+        '/status - 查看当前状态',
+        '/stop - 停止当前会话',
+        '/cwd /path - 修改工作目录',
+        '/mode plan|code|ask - 切换模式',
+        '/prompt scopes|get|set|clear - 管理作用域 Prompt',
+        '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
+        // '/new [path] - 新建会话',
+        // '/bind &lt;session_id&gt; - 绑定已有会话',
+        // '/sessions - 查看最近会话',
+        // '1/2/3 - 快捷响应权限请求（飞书/QQ，且仅有一个待处理请求时）',
+        // '/help - 查看帮助',
       ].join('\n');
       break;
 
