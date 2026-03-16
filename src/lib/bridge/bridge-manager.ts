@@ -113,6 +113,33 @@ const MODEL_SHORTCUTS: Array<{
   { command: '/codebuddy', alias: 'codebuddy', label: 'CodeBuddy' },
 ];
 
+// Synced from `codebuddy --help` on 2026-03-16.
+const CODEBUDDY_AVAILABLE_MODELS = [
+  'claude-sonnet-4.6',
+  'claude-4.5',
+  'claude-opus-4.6',
+  'claude-opus-4.5',
+  'claude-haiku-4.5',
+  'gemini-3.1-pro',
+  'gemini-3.0-flash',
+  'gemini-2.5-pro',
+  'gemini-3.1-flash-lite',
+  'gpt-5.4',
+  'gpt-5.2',
+  'gpt-5.3-codex',
+  'gpt-5.2-codex',
+  'gpt-5.1',
+  'gpt-5.1-codex',
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+  'glm-5.0-ioa',
+  'glm-4.7-ioa',
+  'minimax-m2.5-ioa',
+  'kimi-k2.5-ioa',
+  'deepseek-v3-2-volc-ioa',
+  'hunyuan-2.0-thinking-ioa',
+] as const;
+
 function looksLikeModelFamily(alias: ModelShortcutName, model?: string | null): boolean {
   if (!model) return false;
   switch (alias) {
@@ -155,7 +182,15 @@ function isValidModelSelection(input: string): boolean {
   return /^[A-Za-z0-9._:/-]{1,120}$/.test(input);
 }
 
+function getAvailableModelList(currentModel?: string | null, defaultModel?: string | null): string[] {
+  const candidates = new Set<string>(CODEBUDDY_AVAILABLE_MODELS);
+  if (currentModel?.trim()) candidates.add(currentModel.trim());
+  if (defaultModel?.trim()) candidates.add(defaultModel.trim());
+  return Array.from(candidates);
+}
+
 function buildModelCommandHelp(currentModel?: string | null, defaultModel?: string | null): string {
+  const availableModels = getAvailableModelList(currentModel, defaultModel);
   const lines = [
     '<b>Model Switch</b>',
     '',
@@ -163,7 +198,7 @@ function buildModelCommandHelp(currentModel?: string | null, defaultModel?: stri
     `Default: <code>${escapeHtml(defaultModel || 'runtime default')}</code>`,
     '',
     'Direct switch:',
-    '<code>/model &lt;model_name&gt;</code>',
+    '<code>/model model_name</code>',
     '',
     'Quick switches:',
   ];
@@ -177,7 +212,12 @@ function buildModelCommandHelp(currentModel?: string | null, defaultModel?: stri
     }
   }
 
-  lines.push('', '示例：<code>/model claude-sonnet-4-20250514</code>');
+  lines.push('', 'Available models (from codebuddy --help):');
+  for (const model of availableModels) {
+    lines.push(`- <code>${escapeHtml(model)}</code>`);
+  }
+
+  lines.push('', '示例：<code>/model kimi-k2.5-ioa</code>');
   return lines.join('\n');
 }
 
