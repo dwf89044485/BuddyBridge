@@ -143,9 +143,7 @@ describe('bridge-manager model switch commands', () => {
 
   it('shows current model and shortcut hints for /model', async () => {
     const store = createModelSwitchStore({
-      bridge_default_model: 'claude-sonnet-4-20250514',
-      bridge_model_alias_gpt: 'gpt-5',
-      bridge_model_alias_codebuddy: 'codebuddy-pro',
+      bridge_default_model: 'kimi-k2.5-ioa',
     });
 
     initBridgeContext({
@@ -167,10 +165,11 @@ describe('bridge-manager model switch commands', () => {
     });
 
     assert.equal(sentMessages.length, 1);
-    assert.match(sentMessages[0].text || '', /Model Switch/);
-    assert.match(sentMessages[0].text || '', /Current: <code>claude-sonnet-4-20250514<\/code>/);
-    assert.match(sentMessages[0].text || '', /\/gpt → <code>gpt-5<\/code>/);
-    assert.match(sentMessages[0].text || '', /\/codebuddy → <code>codebuddy-pro<\/code>/);
+    assert.match(sentMessages[0].text || '', /模型切换/);
+    assert.match(sentMessages[0].text || '', /当前模型：<code>kimi-k2.5-ioa<\/code>/);
+    assert.match(sentMessages[0].text || '', /<code>claude-sonnet-4\.6<\/code>（<code>\/sonnet<\/code>）/);
+    assert.match(sentMessages[0].text || '', /<code>gpt-5\.4<\/code>（<code>\/gpt<\/code>）/);
+    assert.match(sentMessages[0].text || '', /选型建议/);
   });
 
   it('switches binding and session model via /model <name> and clears sdkSessionId', async () => {
@@ -205,10 +204,9 @@ describe('bridge-manager model switch commands', () => {
     assert.match(sentMessages[0].text || '', /已切换到模型 <code>gpt-5<\/code>/);
   });
 
-  it('switches model via configured /gpt shortcut', async () => {
+  it('switches model via /gpt shortcut', async () => {
     const store = createModelSwitchStore({
       bridge_default_model: 'claude-sonnet-4-20250514',
-      bridge_model_alias_gpt: 'gpt-5',
     });
 
     initBridgeContext({
@@ -230,9 +228,38 @@ describe('bridge-manager model switch commands', () => {
     });
 
     const binding = store.getChannelBinding('qq', 'chat-1');
-    assert.equal(binding?.model, 'gpt-5');
-    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5');
-    assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt<\/code> 切换到 <code>gpt-5<\/code>/);
+    assert.equal(binding?.model, 'gpt-5.4');
+    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5.4');
+    assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt<\/code> 切换到 <code>gpt-5\.4<\/code>/);
+  });
+
+  it('switches model via /gpt code shortcut', async () => {
+    const store = createModelSwitchStore({
+      bridge_default_model: 'claude-sonnet-4-20250514',
+    });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-gpt-code-shortcut',
+      address: { channelType: 'qq', chatId: 'chat-1', userId: 'user-1' },
+      text: '/gpt code',
+      timestamp: Date.now(),
+    });
+
+    const binding = store.getChannelBinding('qq', 'chat-1');
+    assert.equal(binding?.model, 'gpt-5.3-codex');
+    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5.3-codex');
+    assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt code<\/code> 切换到 <code>gpt-5\.3-codex<\/code>/);
   });
 });
 

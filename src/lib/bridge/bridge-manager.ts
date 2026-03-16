@@ -100,61 +100,37 @@ function flushPreview(
   });
 }
 
-type ModelShortcutName = 'claude' | 'gpt' | 'codex' | 'codebuddy';
+type ModelShortcutName = 'sonnet' | 'opus' | 'pro' | 'flash' | 'gpt' | 'gpt_code' | 'glm' | 'minimax' | 'kimi';
+
+type ShortcutCommand = '/sonnet' | '/opus' | '/pro' | '/flash' | '/gpt' | '/gpt code' | '/glm' | '/minimax' | '/kimi';
 
 const MODEL_SHORTCUTS: Array<{
-  command: `/${ModelShortcutName}`;
+  command: ShortcutCommand;
   alias: ModelShortcutName;
-  label: string;
+  model: string;
 }> = [
-  { command: '/claude', alias: 'claude', label: 'Claude' },
-  { command: '/gpt', alias: 'gpt', label: 'GPT / OpenAI' },
-  { command: '/codex', alias: 'codex', label: 'Codex' },
-  { command: '/codebuddy', alias: 'codebuddy', label: 'CodeBuddy' },
+  { command: '/sonnet', alias: 'sonnet', model: 'claude-sonnet-4.6' },
+  { command: '/opus', alias: 'opus', model: 'claude-opus-4.6' },
+  { command: '/pro', alias: 'pro', model: 'gemini-3.1-pro' },
+  { command: '/flash', alias: 'flash', model: 'gemini-3.1-flash-lite' },
+  { command: '/gpt', alias: 'gpt', model: 'gpt-5.4' },
+  { command: '/gpt code', alias: 'gpt_code', model: 'gpt-5.3-codex' },
+  { command: '/glm', alias: 'glm', model: 'glm-5.0-ioa' },
+  { command: '/minimax', alias: 'minimax', model: 'minimax-m2.5-ioa' },
+  { command: '/kimi', alias: 'kimi', model: 'kimi-k2.5-ioa' },
 ];
 
-// Synced from `codebuddy --help` on 2026-03-16.
-const CODEBUDDY_AVAILABLE_MODELS = [
+const RECOMMENDED_MODELS = [
   'claude-sonnet-4.6',
-  'claude-4.5',
   'claude-opus-4.6',
-  'claude-opus-4.5',
-  'claude-haiku-4.5',
   'gemini-3.1-pro',
-  'gemini-3.0-flash',
-  'gemini-2.5-pro',
   'gemini-3.1-flash-lite',
   'gpt-5.4',
-  'gpt-5.2',
   'gpt-5.3-codex',
-  'gpt-5.2-codex',
-  'gpt-5.1',
-  'gpt-5.1-codex',
-  'gpt-5.1-codex-max',
-  'gpt-5.1-codex-mini',
   'glm-5.0-ioa',
-  'glm-4.7-ioa',
   'minimax-m2.5-ioa',
   'kimi-k2.5-ioa',
-  'deepseek-v3-2-volc-ioa',
-  'hunyuan-2.0-thinking-ioa',
 ] as const;
-
-function looksLikeModelFamily(alias: ModelShortcutName, model?: string | null): boolean {
-  if (!model) return false;
-  switch (alias) {
-    case 'claude':
-      return /^claude/i.test(model);
-    case 'gpt':
-      return /^(gpt-|o[1-9][-_]|davinci|text-|openai\/)/i.test(model);
-    case 'codex':
-      return /^codex[-_]/i.test(model);
-    case 'codebuddy':
-      return /^codebuddy(?:[-_/]|$)/i.test(model);
-    default:
-      return false;
-  }
-}
 
 function getModelShortcutSettingKey(alias: ModelShortcutName): string {
   return `bridge_model_alias_${alias}`;
@@ -162,20 +138,15 @@ function getModelShortcutSettingKey(alias: ModelShortcutName): string {
 
 function getConfiguredShortcutModel(alias: ModelShortcutName): string | undefined {
   const { store } = getBridgeContext();
+  const shortcut = MODEL_SHORTCUTS.find((item) => item.alias === alias);
   const configured = store.getSetting(getModelShortcutSettingKey(alias))?.trim();
-  return configured || undefined;
+  return configured || shortcut?.model;
 }
 
 function resolveShortcutModel(
   alias: ModelShortcutName,
-  currentModel?: string | null,
-  defaultModel?: string | null,
 ): string | undefined {
-  const configured = getConfiguredShortcutModel(alias);
-  if (configured) return configured;
-  if (looksLikeModelFamily(alias, currentModel)) return currentModel || undefined;
-  if (looksLikeModelFamily(alias, defaultModel)) return defaultModel || undefined;
-  return undefined;
+  return getConfiguredShortcutModel(alias);
 }
 
 function isValidModelSelection(input: string): boolean {
@@ -183,7 +154,7 @@ function isValidModelSelection(input: string): boolean {
 }
 
 function getAvailableModelList(currentModel?: string | null, defaultModel?: string | null): string[] {
-  const candidates = new Set<string>(CODEBUDDY_AVAILABLE_MODELS);
+  const candidates = new Set<string>(RECOMMENDED_MODELS);
   if (currentModel?.trim()) candidates.add(currentModel.trim());
   if (defaultModel?.trim()) candidates.add(defaultModel.trim());
   return Array.from(candidates);
@@ -191,34 +162,54 @@ function getAvailableModelList(currentModel?: string | null, defaultModel?: stri
 
 function buildModelCommandHelp(currentModel?: string | null, defaultModel?: string | null): string {
   const availableModels = getAvailableModelList(currentModel, defaultModel);
+  const shortcutByModel = new Map(MODEL_SHORTCUTS.map((item) => [item.model, item.command]));
   const lines = [
-    '<b>Model Switch</b>',
+    '<b>模型切换</b>',
     '',
-    `Current: <code>${escapeHtml(currentModel || 'default')}</code>`,
-    `Default: <code>${escapeHtml(defaultModel || 'runtime default')}</code>`,
+    `当前模型：<code>${escapeHtml(currentModel || 'default')}</code>`,
+    `默认模型：<code>${escapeHtml(defaultModel || 'runtime default')}</code>`,
     '',
-    'Direct switch:',
+    '直接切换：',
     '<code>/model model_name</code>',
-    '',
-    'Quick switches:',
   ];
 
-  for (const shortcut of MODEL_SHORTCUTS) {
-    const target = resolveShortcutModel(shortcut.alias, currentModel, defaultModel);
-    if (target) {
-      lines.push(`${shortcut.command} → <code>${escapeHtml(target)}</code>`);
+  lines.push('', '模型列表：');
+  for (const model of availableModels) {
+    const shortcut = shortcutByModel.get(model);
+    if (shortcut) {
+      lines.push(`- <code>${escapeHtml(model)}</code>（<code>${escapeHtml(shortcut)}</code>）`);
     } else {
-      lines.push(`${shortcut.command} → 未配置（设置 <code>${escapeHtml(getModelShortcutSettingKey(shortcut.alias))}</code> 后可直切）`);
+      lines.push(`- <code>${escapeHtml(model)}</code>`);
     }
   }
 
-  lines.push('', 'Available models (from codebuddy --help):');
-  for (const model of availableModels) {
-    lines.push(`- <code>${escapeHtml(model)}</code>`);
-  }
-
-  lines.push('', '示例：<code>/model kimi-k2.5-ioa</code>');
+  lines.push(
+    '',
+    '选型建议：',
+    '- 情绪表达与陪伴 -> <code>/opus</code>、<code>/gpt</code>',
+    '  首选 Opus - 想倾诉 / 需要被理解',
+    '  次选 GPT - 想要具体建议 / 知道自己要什么',
+    '- 亲密关系与人际沟通 -> <code>/opus</code>',
+    '- 育儿知识与指引 -> <code>/pro</code>（Gemini Pro）',
+    '- 自我认知与成长探索 -> <code>/opus</code>',
+    '- 健康咨询与身体管理 -> <code>/pro</code>（Gemini Pro）',
+    '- 重大人生决策 -> <code>/opus</code>、<code>/gpt</code>',
+    '  首选 Opus - 方向迷茫 / 还没想清楚',
+    '  次选 GPT - 方向已有 / 需要梳理验证',
+    '',
+    '示例：<code>/model kimi-k2.5-ioa</code> 或 <code>/gpt</code>',
+  );
   return lines.join('\n');
+}
+
+function parseModelShortcutCommand(command: string, args: string): ShortcutCommand | null {
+  if (command === '/gpt' && args.toLowerCase() === 'code') {
+    return '/gpt code';
+  }
+  const merged = args ? `${command} ${args.toLowerCase()}` : command;
+  return MODEL_SHORTCUTS.some((item) => item.command === merged as ShortcutCommand)
+    ? merged as ShortcutCommand
+    : null;
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -926,7 +917,8 @@ async function handleCommand(
         '/mode plan|code|ask - 切换模式',
         '/model - 查看当前模型与快捷切换',
         '/model &lt;name&gt; - 切换到指定模型',
-        '/claude /gpt /codex /codebuddy - 快捷切换模型',
+        '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
+        '/gpt code - 切换到 gpt-5.3-codex',
         '/prompt scopes|get|set|clear - 管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
@@ -1041,14 +1033,19 @@ async function handleCommand(
       break;
     }
 
-    case '/claude':
+    case '/sonnet':
+    case '/opus':
+    case '/pro':
+    case '/flash':
     case '/gpt':
-    case '/codex':
-    case '/codebuddy': {
-      const shortcut = MODEL_SHORTCUTS.find(item => item.command === command);
+    case '/glm':
+    case '/minimax':
+    case '/kimi': {
+      const shortcutCommand = parseModelShortcutCommand(command, args);
+      const shortcut = MODEL_SHORTCUTS.find((item) => item.command === shortcutCommand);
       const binding = router.resolve(msg.address);
       const targetModel = shortcut
-        ? resolveShortcutModel(shortcut.alias, binding.model, defaultModel)
+        ? resolveShortcutModel(shortcut.alias)
         : undefined;
       if (!shortcut || !targetModel) {
         const alias = shortcut?.alias || command.replace('/', '');
@@ -1066,7 +1063,7 @@ async function handleCommand(
       const runningHint = st.activeTasks.has(binding.codepilotSessionId)
         ? '\n当前任务不会被中断，新模型会从下一条消息开始生效。'
         : '';
-      response = `已通过 <code>${escapeHtml(command)}</code> 切换到 <code>${escapeHtml(targetModel)}</code>。${runningHint}`;
+      response = `已通过 <code>${escapeHtml(shortcut.command)}</code> 切换到 <code>${escapeHtml(targetModel)}</code>。${runningHint}`;
       break;
     }
 
@@ -1143,7 +1140,8 @@ async function handleCommand(
         '/mode plan|code|ask - 切换模式',
         '/model - 查看当前模型与快捷切换',
         '/model &lt;name&gt; - 切换到指定模型',
-        '/claude /gpt /codex /codebuddy - 快捷切换模型',
+        '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
+        '/gpt code - 切换到 gpt-5.3-codex',
         '/prompt scopes|get|set|clear - 管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
