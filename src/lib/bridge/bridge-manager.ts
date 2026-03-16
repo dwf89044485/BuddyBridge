@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, ToolCallInfo } from './types.js';
+import type { BridgeStatus, ChannelAddress, InboundMessage, OutboundMessage, SendResult, StreamingPreviewState, ToolCallInfo } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -100,9 +100,88 @@ function flushPreview(
   });
 }
 
-// ── Channel-aware rendering dispatch ──────────────────────────
+type ModelShortcutName = 'claude' | 'gpt' | 'codex' | 'codebuddy';
 
-import type { ChannelAddress, SendResult } from './types.js';
+const MODEL_SHORTCUTS: Array<{
+  command: `/${ModelShortcutName}`;
+  alias: ModelShortcutName;
+  label: string;
+}> = [
+  { command: '/claude', alias: 'claude', label: 'Claude' },
+  { command: '/gpt', alias: 'gpt', label: 'GPT / OpenAI' },
+  { command: '/codex', alias: 'codex', label: 'Codex' },
+  { command: '/codebuddy', alias: 'codebuddy', label: 'CodeBuddy' },
+];
+
+function looksLikeModelFamily(alias: ModelShortcutName, model?: string | null): boolean {
+  if (!model) return false;
+  switch (alias) {
+    case 'claude':
+      return /^claude/i.test(model);
+    case 'gpt':
+      return /^(gpt-|o[1-9][-_]|davinci|text-|openai\/)/i.test(model);
+    case 'codex':
+      return /^codex[-_]/i.test(model);
+    case 'codebuddy':
+      return /^codebuddy(?:[-_/]|$)/i.test(model);
+    default:
+      return false;
+  }
+}
+
+function getModelShortcutSettingKey(alias: ModelShortcutName): string {
+  return `bridge_model_alias_${alias}`;
+}
+
+function getConfiguredShortcutModel(alias: ModelShortcutName): string | undefined {
+  const { store } = getBridgeContext();
+  const configured = store.getSetting(getModelShortcutSettingKey(alias))?.trim();
+  return configured || undefined;
+}
+
+function resolveShortcutModel(
+  alias: ModelShortcutName,
+  currentModel?: string | null,
+  defaultModel?: string | null,
+): string | undefined {
+  const configured = getConfiguredShortcutModel(alias);
+  if (configured) return configured;
+  if (looksLikeModelFamily(alias, currentModel)) return currentModel || undefined;
+  if (looksLikeModelFamily(alias, defaultModel)) return defaultModel || undefined;
+  return undefined;
+}
+
+function isValidModelSelection(input: string): boolean {
+  return /^[A-Za-z0-9._:/-]{1,120}$/.test(input);
+}
+
+function buildModelCommandHelp(currentModel?: string | null, defaultModel?: string | null): string {
+  const lines = [
+    '<b>Model Switch</b>',
+    '',
+    `Current: <code>${escapeHtml(currentModel || 'default')}</code>`,
+    `Default: <code>${escapeHtml(defaultModel || 'runtime default')}</code>`,
+    '',
+    'Direct switch:',
+    '<code>/model &lt;model_name&gt;</code>',
+    '',
+    'Quick switches:',
+  ];
+
+  for (const shortcut of MODEL_SHORTCUTS) {
+    const target = resolveShortcutModel(shortcut.alias, currentModel, defaultModel);
+    if (target) {
+      lines.push(`${shortcut.command} → <code>${escapeHtml(target)}</code>`);
+    } else {
+      lines.push(`${shortcut.command} → 未配置（设置 <code>${escapeHtml(getModelShortcutSettingKey(shortcut.alias))}</code> 后可直切）`);
+    }
+  }
+
+  lines.push('', '示例：<code>/model claude-sonnet-4-20250514</code>');
+  return lines.join('\n');
+}
+
+// ── Channel-aware rendering dispatch ──────────────────────────
 
 /**
  * Render response text and deliver via the appropriate channel format.
@@ -769,6 +848,7 @@ async function handleCommand(
   const parts = text.split(/\s+/);
   const command = parts[0].split('@')[0].toLowerCase();
   const args = parts.slice(1).join(' ').trim();
+  const defaultModel = store.getSetting('bridge_default_model') || store.getSetting('default_model') || '';
 
   // Run dangerous-input detection on the full command text
   const dangerCheck = isDangerousInput(text);
@@ -804,6 +884,9 @@ async function handleCommand(
         '/stop - 停止当前会话',
         '/cwd /path - 修改工作目录',
         '/mode plan|code|ask - 切换模式',
+        '/model - 查看当前模型与快捷切换',
+        '/model &lt;name&gt; - 切换到指定模型',
+        '/claude /gpt /codex /codebuddy - 快捷切换模型',
         '/prompt scopes|get|set|clear - 管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
@@ -892,6 +975,61 @@ async function handleCommand(
       break;
     }
 
+    case '/model': {
+      const binding = router.resolve(msg.address);
+      if (!args) {
+        response = buildModelCommandHelp(binding.model, defaultModel);
+        break;
+      }
+      const targetModel = args.trim();
+      if (!isValidModelSelection(targetModel)) {
+        response = [
+          '模型名格式无效。',
+          '',
+          '仅支持字母、数字以及 <code>.-_:/</code> 这些字符。',
+          '示例：<code>/model claude-sonnet-4-20250514</code>',
+        ].join('\n');
+        break;
+      }
+      router.updateBinding(binding.id, { model: targetModel, sdkSessionId: '' });
+      store.updateSessionModel(binding.codepilotSessionId, targetModel);
+      const st = getState();
+      const runningHint = st.activeTasks.has(binding.codepilotSessionId)
+        ? '\n当前任务不会被中断，新模型会从下一条消息开始生效。'
+        : '';
+      response = `已切换到模型 <code>${escapeHtml(targetModel)}</code>。${runningHint}`;
+      break;
+    }
+
+    case '/claude':
+    case '/gpt':
+    case '/codex':
+    case '/codebuddy': {
+      const shortcut = MODEL_SHORTCUTS.find(item => item.command === command);
+      const binding = router.resolve(msg.address);
+      const targetModel = shortcut
+        ? resolveShortcutModel(shortcut.alias, binding.model, defaultModel)
+        : undefined;
+      if (!shortcut || !targetModel) {
+        const alias = shortcut?.alias || command.replace('/', '');
+        response = [
+          `${escapeHtml(command)} 尚未配置具体模型。`,
+          '',
+          `请直接使用 <code>/model &lt;model_name&gt;</code>，或配置 <code>${escapeHtml(getModelShortcutSettingKey(alias as ModelShortcutName))}</code>。`,
+          '配置完成后可用 <code>/model</code> 查看当前快捷映射。',
+        ].join('\n');
+        break;
+      }
+      router.updateBinding(binding.id, { model: targetModel, sdkSessionId: '' });
+      store.updateSessionModel(binding.codepilotSessionId, targetModel);
+      const st = getState();
+      const runningHint = st.activeTasks.has(binding.codepilotSessionId)
+        ? '\n当前任务不会被中断，新模型会从下一条消息开始生效。'
+        : '';
+      response = `已通过 <code>${escapeHtml(command)}</code> 切换到 <code>${escapeHtml(targetModel)}</code>。${runningHint}`;
+      break;
+    }
+
     case '/status': {
       const binding = router.resolve(msg.address);
       response = [
@@ -963,6 +1101,9 @@ async function handleCommand(
         '/stop - 停止当前会话',
         '/cwd /path - 修改工作目录',
         '/mode plan|code|ask - 切换模式',
+        '/model - 查看当前模型与快捷切换',
+        '/model &lt;name&gt; - 切换到指定模型',
+        '/claude /gpt /codex /codebuddy - 快捷切换模型',
         '/prompt scopes|get|set|clear - 管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
