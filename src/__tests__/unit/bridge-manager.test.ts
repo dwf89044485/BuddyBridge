@@ -10,10 +10,13 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { initBridgeContext } from '../../lib/bridge/context';
-import type { BridgeStore, LifecycleHooks } from '../../lib/bridge/host';
+import type { AuditLogInput, BridgeStore, LifecycleHooks, OutboundRefInput } from '../../lib/bridge/host';
 import type { BaseChannelAdapter } from '../../lib/bridge/channel-adapter';
-import type { ChannelBinding, OutboundMessage } from '../../lib/bridge/types';
+import type { ChannelBinding, OutboundMessage, SendResult } from '../../lib/bridge/types';
 
 // ── Test the session lock mechanism directly ────────────────
 // We test the processWithSessionLock pattern by extracting its logic.
@@ -135,6 +138,330 @@ describe('bridge-manager lifecycle', () => {
   });
 });
 
+describe('bridge-manager weekly upload reminder', () => {
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)['__bridge_manager__'];
+    delete (globalThis as Record<string, unknown>)['__bridge_context__'];
+  });
+
+  it('reminds active bindings when .uploads contains files at Monday 10:00', async () => {
+    const store = createModelSwitchStore({ remote_bridge_enabled: 'true' });
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-reminder-'));
+    const uploadDir = path.join(tempRoot, '.uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    fs.writeFileSync(path.join(uploadDir, '需求说明.txt'), 'hello');
+
+    store.upsertChannelBinding({
+      channelType: 'qq',
+      chatId: 'chat-reminder',
+      codepilotSessionId: 'session-reminder',
+      sdkSessionId: '',
+      workingDirectory: tempRoot,
+      model: 'gpt-5.4',
+      mode: 'code',
+      scopeKey: 'qq:chat:chat-reminder',
+      scopeChain: [{ kind: 'chat', id: 'chat-reminder' }],
+    });
+    store.sessions.set('session-reminder', { id: 'session-reminder', working_directory: tempRoot, model: 'gpt-5.4' });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+    const { registerAdapter, _internals } = await import('../../lib/bridge/bridge-manager');
+    registerAdapter(adapter);
+
+    const now = new Date('2026-03-16T10:00:00');
+    await _internals.runWeeklyUploadReminderCheck(now);
+
+    assert.equal(sentMessages.length, 1);
+    assert.equal(sentMessages[0].address.chatId, 'chat-reminder');
+    assert.equal(sentMessages[0].address.channelType, 'qq');
+    assert.match(sentMessages[0].text || '', /当前共有 1 个文件/);
+    assert.match(sentMessages[0].text || '', /\.uploads/);
+    assert.equal(store.outboundRefs.length, 1);
+    assert.equal(store.outboundRefs[0].chatId, 'chat-reminder');
+    assert.equal(store.outboundRefs[0].codepilotSessionId, 'session-reminder');
+    assert.equal(store.outboundRefs[0].purpose, 'response');
+    assert.equal(store.auditLogs.length, 1);
+    assert.equal(store.auditLogs[0].chatId, 'chat-reminder');
+    assert.equal(store.auditLogs[0].direction, 'outbound');
+    assert.equal(store.dedupKeys.size, 1);
+    assert.ok(store.dedupKeys.has(_internals.getUploadReminderDedupKey('binding-qq-chat-reminder', now)));
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('does not remind outside Monday 10:00 or when directory is empty', async () => {
+    const store = createModelSwitchStore({ remote_bridge_enabled: 'true' });
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-reminder-empty-'));
+    fs.mkdirSync(path.join(tempRoot, '.uploads'), { recursive: true });
+
+    store.upsertChannelBinding({
+      channelType: 'qq',
+      chatId: 'chat-empty',
+      codepilotSessionId: 'session-empty',
+      sdkSessionId: '',
+      workingDirectory: tempRoot,
+      model: 'gpt-5.4',
+      mode: 'code',
+      scopeKey: 'qq:chat:chat-empty',
+      scopeChain: [{ kind: 'chat', id: 'chat-empty' }],
+    });
+    store.sessions.set('session-empty', { id: 'session-empty', working_directory: tempRoot, model: 'gpt-5.4' });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+    const { registerAdapter, _internals } = await import('../../lib/bridge/bridge-manager');
+    registerAdapter(adapter);
+
+    await _internals.runWeeklyUploadReminderCheck(new Date('2026-03-16T09:59:00'));
+    await _internals.runWeeklyUploadReminderCheck(new Date('2026-03-16T10:00:00'));
+
+    assert.equal(sentMessages.length, 0);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('deduplicates reminders for the same binding and time window', async () => {
+    const store = createModelSwitchStore({ remote_bridge_enabled: 'true' });
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-reminder-dedup-'));
+    const uploadDir = path.join(tempRoot, '.uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    fs.writeFileSync(path.join(uploadDir, '需求说明.txt'), 'hello');
+
+    store.upsertChannelBinding({
+      channelType: 'qq',
+      chatId: 'chat-dedup',
+      codepilotSessionId: 'session-dedup',
+      sdkSessionId: '',
+      workingDirectory: tempRoot,
+      model: 'gpt-5.4',
+      mode: 'code',
+      scopeKey: 'qq:chat:chat-dedup',
+      scopeChain: [{ kind: 'chat', id: 'chat-dedup' }],
+    });
+    store.sessions.set('session-dedup', { id: 'session-dedup', working_directory: tempRoot, model: 'gpt-5.4' });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+    const { registerAdapter, _internals } = await import('../../lib/bridge/bridge-manager');
+    registerAdapter(adapter);
+
+    const now = new Date('2026-03-16T10:00:00');
+    await _internals.runWeeklyUploadReminderCheck(now);
+    await _internals.runWeeklyUploadReminderCheck(now);
+
+    assert.equal(sentMessages.length, 1);
+    assert.equal(store.outboundRefs.length, 1);
+    assert.equal(store.auditLogs.length, 1);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('retries future reminder checks when proactive delivery fails', async () => {
+    const store = createModelSwitchStore({ remote_bridge_enabled: 'true' });
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-reminder-fail-'));
+    const uploadDir = path.join(tempRoot, '.uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    fs.writeFileSync(path.join(uploadDir, '待处理.csv'), 'id,name');
+
+    store.upsertChannelBinding({
+      channelType: 'qq',
+      chatId: 'chat-fail',
+      codepilotSessionId: 'session-fail',
+      sdkSessionId: '',
+      workingDirectory: tempRoot,
+      model: 'gpt-5.4',
+      mode: 'code',
+      scopeKey: 'qq:chat:chat-fail',
+      scopeChain: [{ kind: 'chat', id: 'chat-fail' }],
+    });
+    store.sessions.set('session-fail', { id: 'session-fail', working_directory: tempRoot, model: 'gpt-5.4' });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const sentMessages: OutboundMessage[] = [];
+    const sendResults: SendResult[] = [
+      { ok: false, error: 'permanent send failure', httpStatus: 400 } as SendResult,
+      { ok: false, error: 'permanent send failure', httpStatus: 400 } as SendResult,
+    ];
+    const adapter = createCommandTestAdapter(sentMessages, () => sendResults.shift() || ({ ok: false, error: 'permanent send failure', httpStatus: 400 } as SendResult));
+    const { registerAdapter, _internals } = await import('../../lib/bridge/bridge-manager');
+    registerAdapter(adapter);
+
+    const now = new Date('2026-03-16T10:00:00');
+    await _internals.runWeeklyUploadReminderCheck(now);
+    await _internals.runWeeklyUploadReminderCheck(now);
+
+    assert.equal(sentMessages.length, 2);
+    assert.equal(sentMessages[0].address.chatId, 'chat-fail');
+    assert.equal(sentMessages[1].address.chatId, 'chat-fail');
+    assert.equal(store.dedupKeys.size, 0);
+    assert.equal(store.outboundRefs.length, 0);
+    assert.equal(store.auditLogs.length, 0);
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+});
+
+
+describe('bridge-manager prompt commands', () => {
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)['__bridge_manager__'];
+    delete (globalThis as Record<string, unknown>)['__bridge_context__'];
+  });
+
+  it('sets and reads scoped prompt via /prompt set and /prompt get', async () => {
+    const store = createModelSwitchStore({
+      bridge_default_model: 'gpt-5.4',
+    });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-prompt-set',
+      address: {
+        channelType: 'qq',
+        chatId: 'chat-prompt-set',
+        userId: 'user-1',
+        scopeChain: [
+          { kind: 'guild', id: 'guild-1' },
+          { kind: 'thread', id: 'thread-1' },
+        ],
+      },
+      text: '/prompt set Thread prompt rules',
+      timestamp: Date.now(),
+    });
+
+    assert.equal(store.getScopedSystemPrompt('qq:thread:thread-1')?.prompt, 'Thread prompt rules');
+    assert.match(sentMessages[0].text || '', /已保存当前作用域 Prompt/);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-prompt-overview-after-set',
+      address: {
+        channelType: 'qq',
+        chatId: 'chat-prompt-set',
+        userId: 'user-1',
+        scopeChain: [
+          { kind: 'guild', id: 'guild-1' },
+          { kind: 'thread', id: 'thread-1' },
+        ],
+      },
+      text: '/prompt',
+      timestamp: Date.now(),
+    });
+
+    assert.match(sentMessages[1].text || '', /当前作用域/);
+    assert.match(sentMessages[1].text || '', /Thread prompt rules/);
+  });
+
+  it('shows prompt overview when /prompt has no subcommand', async () => {
+    const store = createModelSwitchStore({
+      bridge_default_model: 'gpt-5.4',
+    });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-prompt-overview',
+      address: {
+        channelType: 'qq',
+        chatId: 'chat-prompt-overview',
+        userId: 'user-1',
+        scopeChain: [
+          { kind: 'guild', id: 'guild-1' },
+          { kind: 'thread', id: 'thread-1' },
+        ],
+      },
+      text: '/prompt',
+      timestamp: Date.now(),
+    });
+
+    const output = sentMessages[0].text || '';
+    assert.ok(output.includes('作用域 Prompt 管理'));
+    assert.ok(output.includes('切换方式'));
+    assert.ok(output.includes('1. <code>global</code>'));
+    assert.ok(output.includes('2. <code>platform:qq</code>'));
+    assert.ok(output.includes('3. <code>qq:guild:guild-1</code>'));
+    assert.ok(output.includes('4. <code>qq:thread:thread-1</code>'));
+  });
+
+  it('returns usage hint when /prompt get is used', async () => {
+    const store = createModelSwitchStore({
+      bridge_default_model: 'gpt-5.4',
+    });
+
+    initBridgeContext({
+      store,
+      llm: { streamChat: () => new ReadableStream() },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-prompt-get-removed',
+      address: {
+        channelType: 'qq',
+        chatId: 'chat-prompt-get',
+        userId: 'user-1',
+      },
+      text: '/prompt get',
+      timestamp: Date.now(),
+    });
+
+    const output = sentMessages[0].text || '';
+    assert.match(output, /未识别的 \/prompt 子命令/);
+    assert.match(output, /当前仅支持 <code>\/prompt<\/code>、<code>\/prompt set<\/code>、<code>\/prompt clear<\/code>/);
+  });
+});
+
 describe('bridge-manager model switch commands', () => {
   beforeEach(() => {
     delete (globalThis as Record<string, unknown>)['__bridge_manager__'];
@@ -159,7 +486,7 @@ describe('bridge-manager model switch commands', () => {
 
     await _testOnly.handleMessage(adapter, {
       messageId: 'msg-model-help',
-      address: { channelType: 'qq', chatId: 'chat-1', userId: 'user-1' },
+      address: { channelType: 'qq', chatId: 'chat-model-help', userId: 'user-1' },
       text: '/model',
       timestamp: Date.now(),
     });
@@ -190,17 +517,17 @@ describe('bridge-manager model switch commands', () => {
 
     await _testOnly.handleMessage(adapter, {
       messageId: 'msg-model-set',
-      address: { channelType: 'qq', chatId: 'chat-1', userId: 'user-1' },
+      address: { channelType: 'qq', chatId: 'chat-model-set', userId: 'user-1' },
       text: '/model gpt-5',
       timestamp: Date.now(),
     });
 
-    const binding = store.getChannelBinding('qq', 'chat-1');
+    const binding = store.getChannelBinding('qq', 'chat-model-set');
     assert.ok(binding);
     assert.equal(binding?.model, 'gpt-5');
     assert.equal(binding?.sdkSessionId, '');
     assert.equal(store.sessionModelUpdates.at(-1)?.model, 'gpt-5');
-    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5');
+    assert.equal(store.getSession('session-chat-model-set')?.model, 'gpt-5');
     assert.match(sentMessages[0].text || '', /已切换到模型 <code>gpt-5<\/code>/);
   });
 
@@ -222,14 +549,14 @@ describe('bridge-manager model switch commands', () => {
 
     await _testOnly.handleMessage(adapter, {
       messageId: 'msg-gpt-shortcut',
-      address: { channelType: 'qq', chatId: 'chat-1', userId: 'user-1' },
+      address: { channelType: 'qq', chatId: 'chat-gpt-shortcut', userId: 'user-1' },
       text: '/gpt',
       timestamp: Date.now(),
     });
 
-    const binding = store.getChannelBinding('qq', 'chat-1');
+    const binding = store.getChannelBinding('qq', 'chat-gpt-shortcut');
     assert.equal(binding?.model, 'gpt-5.4');
-    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5.4');
+    assert.equal(store.getSession('session-chat-gpt-shortcut')?.model, 'gpt-5.4');
     assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt<\/code> 切换到 <code>gpt-5\.4<\/code>/);
   });
 
@@ -251,19 +578,19 @@ describe('bridge-manager model switch commands', () => {
 
     await _testOnly.handleMessage(adapter, {
       messageId: 'msg-gpt-code-shortcut',
-      address: { channelType: 'qq', chatId: 'chat-1', userId: 'user-1' },
+      address: { channelType: 'qq', chatId: 'chat-gpt-code-shortcut', userId: 'user-1' },
       text: '/gpt code',
       timestamp: Date.now(),
     });
 
-    const binding = store.getChannelBinding('qq', 'chat-1');
+    const binding = store.getChannelBinding('qq', 'chat-gpt-code-shortcut');
     assert.equal(binding?.model, 'gpt-5.3-codex');
-    assert.equal(store.getSession('session-chat-1')?.model, 'gpt-5.3-codex');
+    assert.equal(store.getSession('session-chat-gpt-code-shortcut')?.model, 'gpt-5.3-codex');
     assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt code<\/code> 切换到 <code>gpt-5\.3-codex<\/code>/);
   });
 });
 
-function createCommandTestAdapter(sentMessages: OutboundMessage[]): BaseChannelAdapter {
+function createCommandTestAdapter(sentMessages: OutboundMessage[], sendImpl?: (msg: OutboundMessage) => Promise<SendResult> | SendResult): BaseChannelAdapter {
   return {
     channelType: 'qq',
     isRunning: () => true,
@@ -272,10 +599,16 @@ function createCommandTestAdapter(sentMessages: OutboundMessage[]): BaseChannelA
     consumeOne: async () => null,
     send: async (msg: OutboundMessage) => {
       sentMessages.push(msg);
+      if (sendImpl) {
+        return await sendImpl(msg);
+      }
       return { ok: true, messageId: `reply-${sentMessages.length}` };
     },
     sendMessage: async (msg: OutboundMessage) => {
       sentMessages.push(msg);
+      if (sendImpl) {
+        return await sendImpl(msg);
+      }
       return { ok: true, messageId: `reply-${sentMessages.length}` };
     },
     answerCallback: async () => ({ ok: true }),
@@ -288,21 +621,48 @@ type ModelSwitchStore = BridgeStore & {
   bindings: Map<string, ChannelBinding>;
   sessions: Map<string, { id: string; working_directory: string; model: string; system_prompt?: string; provider_id?: string }>;
   sessionModelUpdates: Array<{ sessionId: string; model: string }>;
+  dedupKeys: Set<string>;
+  auditLogs: AuditLogInput[];
+  outboundRefs: OutboundRefInput[];
 };
 
 function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwitchStore {
   const bindings = new Map<string, ChannelBinding>();
   const sessions = new Map<string, { id: string; working_directory: string; model: string; system_prompt?: string; provider_id?: string }>();
   const sessionModelUpdates: Array<{ sessionId: string; model: string }> = [];
+  const dedupKeys = new Set<string>();
+  const auditLogs: AuditLogInput[] = [];
+  const outboundRefs: OutboundRefInput[] = [];
+  const scopedPrompts = new Map<string, {
+    id: string;
+    scopeKey: string;
+    channelType: string;
+    scopeType: string;
+    prompt: string;
+    createdAt: string;
+    updatedAt: string;
+  }>();
 
   const store: ModelSwitchStore = {
     ...createMinimalStore(settings),
     bindings,
     sessions,
     sessionModelUpdates,
-    getChannelBinding: (channelType: string, chatId: string) => bindings.get(`${channelType}:${chatId}`) || null,
+    dedupKeys,
+    auditLogs,
+    outboundRefs,
+    getChannelBinding: (channelType: string, chatId: string, scopeKey?: string) => {
+      if (scopeKey) {
+        const scoped = bindings.get(`${channelType}:${chatId}:${scopeKey}`);
+        if (scoped) return scoped;
+      }
+      return Array.from(bindings.values()).find((binding) => (
+        binding.channelType === channelType && binding.chatId === chatId
+      )) || null;
+    },
     upsertChannelBinding: (data) => {
-      const key = `${data.channelType}:${data.chatId}`;
+      const scopeKey = data.scopeKey || `${data.channelType}:chat:${data.chatId}`;
+      const key = `${data.channelType}:${data.chatId}:${scopeKey}`;
       const existing = bindings.get(key);
       const binding: ChannelBinding = {
         id: existing?.id || `binding-${data.channelType}-${data.chatId}`,
@@ -313,6 +673,8 @@ function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwi
         workingDirectory: data.workingDirectory,
         model: data.model,
         mode: (data.mode || existing?.mode || 'code') as ChannelBinding['mode'],
+        scopeKey,
+        scopeChain: data.scopeChain || existing?.scopeChain || [{ kind: 'chat', id: data.chatId }],
         active: existing?.active ?? true,
         createdAt: existing?.createdAt || '2026-03-16T00:49:08.558Z',
         updatedAt: '2026-03-16T00:49:08.558Z',
@@ -328,9 +690,39 @@ function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwi
         }
       }
     },
+    listChannelBindings: (channelType?: ChannelBinding['channelType']) => {
+      const all = Array.from(bindings.values());
+      if (!channelType) return all;
+      return all.filter((binding) => binding.channelType === channelType);
+    },
+    getScopedSystemPrompt: (scopeKey: string) => scopedPrompts.get(scopeKey) || null,
+    upsertScopedSystemPrompt: (data) => {
+      const now = new Date().toISOString();
+      const existingScoped = scopedPrompts.get(data.scopeKey);
+      const next = existingScoped
+        ? { ...existingScoped, channelType: data.channelType, scopeType: data.scopeType, prompt: data.prompt, updatedAt: now }
+        : {
+          id: `scoped-${scopedPrompts.size + 1}`,
+          scopeKey: data.scopeKey,
+          channelType: data.channelType,
+          scopeType: data.scopeType,
+          prompt: data.prompt,
+          createdAt: now,
+          updatedAt: now,
+        };
+      scopedPrompts.set(data.scopeKey, next);
+      return next;
+    },
+    deleteScopedSystemPrompt: (scopeKey: string) => scopedPrompts.delete(scopeKey),
+    listScopedSystemPrompts: (channelType?: string) => {
+      const all = Array.from(scopedPrompts.values());
+      if (!channelType) return all;
+      return all.filter((item) => item.channelType === channelType || item.channelType === 'global');
+    },
     getSession: (id: string) => sessions.get(id) || null,
     createSession: (_name: string, model: string, _systemPrompt?: string, cwd?: string) => {
-      const sessionId = 'session-chat-1';
+      const sessionLabel = _name.replace(/^Bridge:\s*/, '').trim() || String(bindings.size + 1);
+      const sessionId = `session-${sessionLabel}`;
       const session = {
         id: sessionId,
         working_directory: cwd || '',
@@ -346,6 +738,16 @@ function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwi
         session.model = model;
       }
     },
+    checkDedup: (key: string) => dedupKeys.has(key),
+    insertDedup: (key: string) => {
+      dedupKeys.add(key);
+    },
+    insertAuditLog: (entry: AuditLogInput) => {
+      auditLogs.push(entry);
+    },
+    insertOutboundRef: (ref: OutboundRefInput) => {
+      outboundRefs.push(ref);
+    },
   };
 
   return store;
@@ -358,6 +760,18 @@ function createMinimalStore(settings: Record<string, string> = {}): BridgeStore 
     upsertChannelBinding: () => ({} as any),
     updateChannelBinding: () => {},
     listChannelBindings: () => [],
+    getScopedSystemPrompt: () => null,
+    upsertScopedSystemPrompt: () => ({
+      id: 'sp-1',
+      scopeKey: 'global',
+      channelType: 'global',
+      scopeType: 'global',
+      prompt: '',
+      createdAt: '',
+      updatedAt: '',
+    }),
+    deleteScopedSystemPrompt: () => false,
+    listScopedSystemPrompts: () => [],
     getSession: () => null,
     createSession: () => ({ id: '1', working_directory: '', model: '' }),
     updateSessionProviderId: () => {},

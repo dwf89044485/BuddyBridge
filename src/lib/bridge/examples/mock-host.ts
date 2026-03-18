@@ -26,6 +26,8 @@ import type {
   StreamChatParams,
   BridgeSession,
   BridgeMessage,
+  UpsertScopedSystemPromptInput,
+  ScopedSystemPrompt,
 } from '../host.js';
 import type { ChannelBinding, ChannelType } from '../types.js';
 
@@ -35,6 +37,7 @@ class InMemoryStore implements BridgeStore {
   private settings = new Map<string, string>();
   private sessions = new Map<string, BridgeSession>();
   private bindings = new Map<string, ChannelBinding>();
+  private scopedPrompts = new Map<string, ScopedSystemPrompt>();
   private messages = new Map<string, BridgeMessage[]>();
   private nextId = 1;
 
@@ -72,6 +75,44 @@ class InMemoryStore implements BridgeStore {
   }
 
   listChannelBindings(_channelType?: ChannelType) { return Array.from(this.bindings.values()); }
+
+  getScopedSystemPrompt(scopeKey: string) {
+    return this.scopedPrompts.get(scopeKey) ?? null;
+  }
+
+  upsertScopedSystemPrompt(data: UpsertScopedSystemPromptInput) {
+    const existing = this.scopedPrompts.get(data.scopeKey);
+    const now = new Date().toISOString();
+    const prompt: ScopedSystemPrompt = existing
+      ? {
+        ...existing,
+        channelType: data.channelType as ChannelType | 'global',
+        scopeType: data.scopeType,
+        prompt: data.prompt,
+        updatedAt: now,
+      }
+      : {
+        id: `scope-${this.nextId++}`,
+        scopeKey: data.scopeKey,
+        channelType: data.channelType as ChannelType | 'global',
+        scopeType: data.scopeType,
+        prompt: data.prompt,
+        createdAt: now,
+        updatedAt: now,
+      };
+    this.scopedPrompts.set(data.scopeKey, prompt);
+    return prompt;
+  }
+
+  deleteScopedSystemPrompt(scopeKey: string) {
+    return this.scopedPrompts.delete(scopeKey);
+  }
+
+  listScopedSystemPrompts(channelType?: string) {
+    const all = Array.from(this.scopedPrompts.values());
+    if (!channelType) return all;
+    return all.filter((item) => item.channelType === channelType || item.channelType === 'global');
+  }
 
   getSession(id: string) { return this.sessions.get(id) ?? null; }
 

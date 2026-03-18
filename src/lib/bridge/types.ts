@@ -18,12 +18,31 @@ export type { FileAttachment } from './host.js';
  */
 export type ChannelType = string;
 
+export interface ScopeRef {
+  /** Scope kind, e.g. guild/channel/thread/chat */
+  kind: string;
+  /** Scope identifier within the channel platform */
+  id: string;
+}
+
 /** Unique address of a user within a channel */
 export interface ChannelAddress {
   channelType: ChannelType;
   chatId: string;        // Platform-specific chat/channel identifier
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
+  /** Optional channel/display name for directory index and UX */
+  channelName?: string | null;
+  /** Optional parent channel/category/thread container name */
+  parentName?: string | null;
+  /** Optional guild/server name */
+  guildName?: string | null;
+  /** Whether current address represents a thread-like scope */
+  isThread?: boolean;
+  /** Optional explicit active scope key, e.g. discord:thread:123 */
+  scopeKey?: string;
+  /** Optional scope chain from broad to narrow, used for layered prompts */
+  scopeChain?: ScopeRef[];
 }
 
 /** Composite key for routing: channelType + chatId */
@@ -91,6 +110,14 @@ export interface ChannelBinding {
   id: string;
   channelType: ChannelType;
   chatId: string;
+  /** Optional channel/display name for directory index and UX */
+  channelName?: string | null;
+  /** Optional parent channel/category/thread container name */
+  parentName?: string | null;
+  /** Optional guild/server name */
+  guildName?: string | null;
+  /** Whether current binding represents a thread-like scope */
+  isThread?: boolean;
   /** CodePilot session ID this chat is bound to */
   codepilotSessionId: string;
   /** SDK session ID for resume (cached from last conversation) */
@@ -101,6 +128,10 @@ export interface ChannelBinding {
   model: string;
   /** Chat mode */
   mode: 'code' | 'plan' | 'ask';
+  /** Optional active scope key, e.g. discord:thread:123 */
+  scopeKey?: string;
+  /** Optional scope chain from broad to narrow */
+  scopeChain?: ScopeRef[];
   /** Whether this binding is currently active */
   active: boolean;
   createdAt: string;

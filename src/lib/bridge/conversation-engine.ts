@@ -17,6 +17,7 @@ import type {
 } from './host.js';
 import { getBridgeContext } from './context.js';
 import crypto from 'crypto';
+import { formatScopeRuleTitle, resolveScope } from './scope-utils.js';
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -71,6 +72,7 @@ export async function processMessage(
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
+  const imageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
 
   // Acquire session lock
   const lockId = crypto.randomBytes(8).toString('hex');
@@ -100,27 +102,35 @@ export async function processMessage(
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
+    let runtimeFiles = files;
     if (files && files.length > 0) {
+      const nonImageFiles = files.filter((file) => !imageMimeTypes.has(file.type));
       const workDir = binding.workingDirectory || session?.working_directory || '';
-      if (workDir) {
+      if (workDir && nonImageFiles.length > 0) {
         try {
-          const uploadDir = path.join(workDir, '.codepilot-uploads');
+          const uploadDir = path.join(workDir, '.uploads');
           if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
           }
-          const fileMeta = files.map((f) => {
+          const fileMeta = nonImageFiles.map((f) => {
             const safeName = path.basename(f.name).replace(/[^a-zA-Z0-9._-]/g, '_');
             const filePath = path.join(uploadDir, `${Date.now()}-${safeName}`);
             const buffer = Buffer.from(f.data, 'base64');
             fs.writeFileSync(filePath, buffer);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
-          savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
+          runtimeFiles = files.map((file) => {
+            const persisted = fileMeta.find((meta) => meta.id === file.id);
+            return persisted ? { ...file, filePath: persisted.filePath, size: persisted.size } : file;
+          });
+          if (fileMeta.length > 0) {
+            savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
+          }
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} image(s) attached] ${text}`;
+          savedContent = `[${files.length} attachment(s) attached] ${text}`;
         }
-      } else {
+      } else if (!workDir) {
         savedContent = `[${files.length} image(s) attached] ${text}`;
       }
     }
@@ -164,18 +174,54 @@ export async function processMessage(
       }
     }
 
+    const resolvedScope = resolveScope(
+      binding.channelType,
+      binding.chatId,
+      binding.scopeKey,
+      binding.scopeChain,
+    );
+
+    const layeredRules = resolvedScope.inheritedScopeKeys
+      .map((scopeKey) => {
+        const scoped = store.getScopedSystemPrompt(scopeKey);
+        if (!scoped || !scoped.prompt.trim()) {
+          return null;
+        }
+        return { scopeKey, prompt: scoped.prompt.trim() };
+      })
+      .filter((item): item is { scopeKey: string; prompt: string } => Boolean(item));
+
+    const basePrompt = session?.system_prompt?.trim() || '';
+    let effectiveSystemPrompt = basePrompt;
+
+    if (layeredRules.length > 0) {
+      const sections = layeredRules.map((rule) => {
+        const title = formatScopeRuleTitle(rule.scopeKey);
+        return `【${title}】\n${rule.prompt}`;
+      });
+
+      const layeredSection = [
+        '以下是当前消息命中的分层规则（从宽到窄排序，越靠后优先级越高）：',
+        ...sections,
+        '如果不同层级存在冲突，以更具体、位置更靠后的规则为准。',
+      ].join('\n\n');
+
+      effectiveSystemPrompt = basePrompt
+        ? `${basePrompt}\n\n${layeredSection}`
+        : layeredSection;
+    }
     const stream = llm.streamChat({
       prompt: text,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
-      systemPrompt: session?.system_prompt || undefined,
+      systemPrompt: effectiveSystemPrompt || undefined,
       workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
       abortController,
       permissionMode,
       provider: resolvedProvider,
       conversationHistory: historyMsgs,
-      files,
+      files: runtimeFiles,
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },

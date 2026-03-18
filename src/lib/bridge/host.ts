@@ -6,7 +6,7 @@
  * interfaces to use the bridge.
  */
 
-import type { ChannelBinding, ChannelType } from './types.js';
+import type { ChannelBinding, ChannelType, ScopeRef } from './types.js';
 
 // ── Bridge-local types (replacing @/types imports) ────────────
 
@@ -129,11 +129,34 @@ export interface OutboundRefInput {
 export interface UpsertChannelBindingInput {
   channelType: string;
   chatId: string;
+  channelName?: string | null;
+  parentName?: string | null;
+  guildName?: string | null;
+  isThread?: boolean;
   codepilotSessionId: string;
   sdkSessionId?: string;
   workingDirectory: string;
   model: string;
   mode?: string;
+  scopeKey?: string;
+  scopeChain?: ScopeRef[];
+}
+
+export interface ScopedSystemPrompt {
+  id: string;
+  scopeKey: string;
+  channelType: ChannelType | 'global';
+  scopeType: string;
+  prompt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertScopedSystemPromptInput {
+  scopeKey: string;
+  channelType: string;
+  scopeType: string;
+  prompt: string;
 }
 
 /**
@@ -145,10 +168,16 @@ export interface BridgeStore {
   getSetting(key: string): string | null;
 
   // ── Channel bindings ──
-  getChannelBinding(channelType: string, chatId: string): ChannelBinding | null;
+  getChannelBinding(channelType: string, chatId: string, scopeKey?: string): ChannelBinding | null;
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding;
   updateChannelBinding(id: string, updates: Partial<ChannelBinding>): void;
   listChannelBindings(channelType?: ChannelType): ChannelBinding[];
+
+  // ── Scoped system prompts ──
+  getScopedSystemPrompt(scopeKey: string): ScopedSystemPrompt | null;
+  upsertScopedSystemPrompt(data: UpsertScopedSystemPromptInput): ScopedSystemPrompt;
+  deleteScopedSystemPrompt(scopeKey: string): boolean;
+  listScopedSystemPrompts(channelType?: string): ScopedSystemPrompt[];
 
   // ── Sessions ──
   getSession(id: string): BridgeSession | null;

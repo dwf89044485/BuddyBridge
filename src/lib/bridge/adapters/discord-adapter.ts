@@ -535,11 +535,27 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     if (!text.trim() && attachments.length === 0) return;
 
+    const isThread = Boolean(message.channel?.isThread?.());
+    const parentChannelId = (message.channel?.parentId || message.channel?.parent?.id) as string | undefined;
+
+    const scopeChain = isGuild
+      ? [
+        { kind: 'guild', id: message.guild.id as string },
+        ...(isThread && parentChannelId ? [{ kind: 'channel', id: parentChannelId as string }] : []),
+        { kind: isThread ? 'thread' : 'channel', id: chatId as string },
+      ]
+      : [{ kind: 'chat', id: chatId as string }];
+
     const address = {
       channelType: 'discord' as const,
       chatId,
       userId,
       displayName,
+      channelName: (message.channel as { name?: string } | null | undefined)?.name ?? null,
+      parentName: (message.channel?.parent as { name?: string } | null | undefined)?.name ?? null,
+      guildName: message.guild?.name ?? null,
+      isThread,
+      scopeChain,
     };
 
     const inbound: InboundMessage = {
@@ -596,6 +612,17 @@ export class DiscordAdapter extends BaseChannelAdapter {
     // Clean up expired interactions
     this.cleanupExpiredInteractions();
 
+    const isGuild = Boolean(interaction.guild);
+    const isThread = Boolean(interaction.channel?.isThread?.());
+    const parentChannelId = (interaction.channel?.parentId || interaction.channel?.parent?.id) as string | undefined;
+    const scopeChain = isGuild
+      ? [
+        { kind: 'guild', id: interaction.guild.id as string },
+        ...(isThread && parentChannelId ? [{ kind: 'channel', id: parentChannelId as string }] : []),
+        { kind: isThread ? 'thread' : 'channel', id: chatId as string },
+      ]
+      : [{ kind: 'chat', id: chatId as string }];
+
     const inbound: InboundMessage = {
       messageId: interactionId,
       address: {
@@ -603,6 +630,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
         chatId,
         userId,
         displayName,
+        channelName: (interaction.channel as { name?: string } | null | undefined)?.name ?? null,
+        parentName: (interaction.channel?.parent as { name?: string } | null | undefined)?.name ?? null,
+        guildName: interaction.guild?.name ?? null,
+        isThread,
+        scopeChain,
       },
       text: '',
       timestamp: Date.now(),

@@ -336,6 +336,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
           channelType: 'feishu',
           chatId,
           userId,
+          channelName: null,
+          parentName: null,
+          guildName: null,
+          isThread: false,
         },
         text: '',
         timestamp: Date.now(),
@@ -1054,10 +1058,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!text.trim() && attachments.length === 0) return;
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
+    const channelName = (msg as unknown as { chat_name?: string }).chat_name
+      || (data as unknown as { chat_name?: string }).chat_name
+      || null;
     const address = {
       channelType: 'feishu' as const,
       chatId,
       userId,
+      channelName,
+      parentName: null,
+      guildName: null,
+      isThread: false,
     };
 
     // [P1] Check for /perm text command (permission approval fallback)

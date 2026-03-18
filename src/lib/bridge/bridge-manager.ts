@@ -7,7 +7,10 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { BridgeStatus, ChannelAddress, InboundMessage, OutboundMessage, SendResult, StreamingPreviewState, ToolCallInfo } from './types.js';
+import type { ScopeRef } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -20,6 +23,7 @@ import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
+import { resolveScope } from './scope-utils.js';
 import {
   validateWorkingDirectory,
   validateSessionId,
@@ -29,6 +33,20 @@ import {
 } from './security/validators.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
+const WEEKLY_UPLOAD_REMINDER_DAY = 1;
+const WEEKLY_UPLOAD_REMINDER_HOUR = 10;
+const WEEKLY_UPLOAD_REMINDER_MINUTE = 0;
+const UPLOAD_DIRECTORY_NAME = '.uploads';
+const UPLOAD_REMINDER_DEDUP_PREFIX = 'upload-cleanup-reminder';
+const UPLOAD_REMINDER_MESSAGE = [
+  '检测到当前工作目录下还有已落盘的附件文件。',
+  '',
+  '请确认这些文件是否还需要保留；如果已经用完，可以考虑清理 `.uploads` 目录。',
+  '',
+  '如需我处理，可以直接回复：',
+  '- 帮我看看 `.uploads` 里有什么',
+  '- 帮我清理 `.uploads`',
+].join('\n');
 
 // ── Streaming preview helpers ──────────────────────────────────
 
@@ -212,6 +230,86 @@ function parseModelShortcutCommand(command: string, args: string): ShortcutComma
     : null;
 }
 
+function buildPromptGuideText(): string {
+  return [
+    '<b>作用域 Prompt 管理</b>',
+    '',
+    '切换方式：',
+    '1. <code>/prompt set 你的提示词</code> - 设置当前作用域 Prompt',
+    '2. <code>/prompt clear</code> - 清空当前作用域 Prompt',
+  ].join('\n');
+}
+
+function inferScopeType(scopeKey: string): string {
+  if (scopeKey === 'global') return 'global';
+  if (scopeKey.startsWith('platform:')) return 'platform';
+  const parts = scopeKey.split(':');
+  return parts[1] || 'chat';
+}
+
+function inferChannelTypeForScope(scopeKey: string, fallback: string): string {
+  if (scopeKey === 'global') return 'global';
+  if (scopeKey.startsWith('platform:')) {
+    return scopeKey.slice('platform:'.length) || fallback;
+  }
+  const parts = scopeKey.split(':');
+  return parts[0] || fallback;
+}
+
+function resolveAddressScope(address: ChannelAddress): {
+  scopeKey: string;
+  scopeChain: ScopeRef[];
+  inheritedScopeKeys: string[];
+} {
+  return resolveScope(
+    address.channelType,
+    address.chatId,
+    address.scopeKey,
+    address.scopeChain,
+  );
+}
+
+function parsePromptCommand(args: string): { subcommand: string; content: string } {
+  const trimmed = args.trim();
+  if (!trimmed) {
+    return { subcommand: '', content: '' };
+  }
+
+  const firstSpace = trimmed.indexOf(' ');
+  if (firstSpace < 0) {
+    return { subcommand: trimmed.toLowerCase(), content: '' };
+  }
+
+  const subcommand = trimmed.slice(0, firstSpace).toLowerCase();
+  const content = trimmed.slice(firstSpace + 1).trim();
+  return { subcommand, content };
+}
+
+function buildPromptOverviewText(
+  inheritedScopeKeys: string[],
+  activeScopeKey: string,
+  getPrompt: (scopeKey: string) => string | null,
+): string {
+  const lines = [
+    buildPromptGuideText(),
+    '',
+    `<b>当前作用域</b>：<code>${escapeHtml(activeScopeKey)}</code>`,
+    '',
+    '<b>当前命中的作用域配置（从宽到窄）</b>',
+  ];
+
+  inheritedScopeKeys.forEach((scopeKey, idx) => {
+    const promptText = getPrompt(scopeKey)?.trim() || '';
+    const status = promptText ? '已配置' : '未配置';
+    lines.push(`${idx + 1}. <code>${escapeHtml(scopeKey)}</code>（${status}）`);
+    if (promptText) {
+      lines.push(`<pre>${escapeHtml(promptText)}</pre>`);
+    }
+  });
+
+  return lines.join('\n');
+}
+
 // ── Channel-aware rendering dispatch ──────────────────────────
 
 /**
@@ -279,6 +377,7 @@ interface BridgeManagerState {
   activeTasks: Map<string, AbortController>;
   /** Per-session processing chains for concurrency control */
   sessionLocks: Map<string, Promise<void>>;
+  weeklyUploadReminderTimer: ReturnType<typeof setTimeout> | null;
   autoStartChecked: boolean;
 }
 
@@ -293,14 +392,144 @@ function getState(): BridgeManagerState {
       loopAborts: new Map(),
       activeTasks: new Map(),
       sessionLocks: new Map(),
+      weeklyUploadReminderTimer: null,
       autoStartChecked: false,
     };
   }
+  const state = g[GLOBAL_KEY];
   // Backfill sessionLocks for states created before this field existed
-  if (!g[GLOBAL_KEY].sessionLocks) {
-    g[GLOBAL_KEY].sessionLocks = new Map();
+  if (!state.sessionLocks) {
+    state.sessionLocks = new Map();
   }
-  return g[GLOBAL_KEY];
+  if (state.weeklyUploadReminderTimer === undefined) {
+    state.weeklyUploadReminderTimer = null;
+  }
+  return state;
+}
+
+function isMondayTenAm(date: Date): boolean {
+  return date.getDay() === WEEKLY_UPLOAD_REMINDER_DAY
+    && date.getHours() === WEEKLY_UPLOAD_REMINDER_HOUR
+    && date.getMinutes() === WEEKLY_UPLOAD_REMINDER_MINUTE;
+}
+
+function getNextWeeklyUploadReminderTime(from: Date): Date {
+  const next = new Date(from);
+  next.setSeconds(0, 0);
+  next.setHours(WEEKLY_UPLOAD_REMINDER_HOUR, WEEKLY_UPLOAD_REMINDER_MINUTE, 0, 0);
+
+  const dayDiff = (WEEKLY_UPLOAD_REMINDER_DAY - next.getDay() + 7) % 7;
+  next.setDate(next.getDate() + dayDiff);
+
+  if (next <= from) {
+    next.setDate(next.getDate() + 7);
+  }
+
+  return next;
+}
+
+function getUploadReminderDedupKey(bindingId: string, when: Date): string {
+  const year = when.getFullYear();
+  const month = String(when.getMonth() + 1).padStart(2, '0');
+  const day = String(when.getDate()).padStart(2, '0');
+  const hour = String(when.getHours()).padStart(2, '0');
+  const minute = String(when.getMinutes()).padStart(2, '0');
+  return `${UPLOAD_REMINDER_DEDUP_PREFIX}:${bindingId}:${year}-${month}-${day}-${hour}${minute}`;
+}
+
+function getUploadDirForBinding(binding: import('./types.js').ChannelBinding): string | null {
+  const workDir = binding.workingDirectory?.trim();
+  if (!workDir) return null;
+  return path.join(workDir, UPLOAD_DIRECTORY_NAME);
+}
+
+function countUploadFiles(uploadDir: string): number {
+  try {
+    const entries = fs.readdirSync(uploadDir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function sendWeeklyUploadReminder(adapter: BaseChannelAdapter, binding: import('./types.js').ChannelBinding, fileCount: number, now: Date): Promise<void> {
+  const { store } = getBridgeContext();
+  const dedupKey = getUploadReminderDedupKey(binding.id, now);
+  if (store.checkDedup(dedupKey)) {
+    return;
+  }
+
+  const text = `${UPLOAD_REMINDER_MESSAGE}\n\n当前共有 ${fileCount} 个文件。`;
+  const result = await deliver(adapter, {
+    address: {
+      channelType: binding.channelType,
+      chatId: binding.chatId,
+      channelName: binding.channelName,
+      parentName: binding.parentName,
+      guildName: binding.guildName,
+      isThread: binding.isThread,
+      scopeKey: binding.scopeKey,
+      scopeChain: binding.scopeChain,
+    },
+    text,
+    parseMode: 'plain',
+  }, {
+    sessionId: binding.codepilotSessionId,
+    dedupKey,
+  });
+
+  if (!result.ok) {
+    console.warn(`[bridge-manager] Failed to send weekly upload reminder for binding ${binding.id}: ${result.error}`);
+  }
+}
+
+async function runWeeklyUploadReminderCheck(now: Date = new Date()): Promise<void> {
+  if (!isMondayTenAm(now)) {
+    return;
+  }
+
+  const state = getState();
+  const bindings = router.listBindings();
+  for (const binding of bindings) {
+    if (!binding.active) continue;
+
+    const adapter = state.adapters.get(binding.channelType);
+    if (!adapter || !adapter.isRunning()) continue;
+
+    const uploadDir = getUploadDirForBinding(binding);
+    if (!uploadDir || !fs.existsSync(uploadDir)) continue;
+
+    const fileCount = countUploadFiles(uploadDir);
+    if (fileCount <= 0) continue;
+
+    await sendWeeklyUploadReminder(adapter, binding, fileCount, now);
+  }
+}
+
+function clearWeeklyUploadReminderTimer(): void {
+  const state = getState();
+  if (state.weeklyUploadReminderTimer) {
+    clearTimeout(state.weeklyUploadReminderTimer);
+    state.weeklyUploadReminderTimer = null;
+  }
+}
+
+function scheduleWeeklyUploadReminder(now: Date = new Date()): void {
+  const state = getState();
+  clearWeeklyUploadReminderTimer();
+
+  const nextRun = getNextWeeklyUploadReminderTime(now);
+  const delay = Math.max(0, nextRun.getTime() - now.getTime());
+
+  state.weeklyUploadReminderTimer = setTimeout(() => {
+    runWeeklyUploadReminderCheck(nextRun)
+      .catch((err) => {
+        console.error('[bridge-manager] Weekly upload reminder failed:', err);
+      })
+      .finally(() => {
+        scheduleWeeklyUploadReminder(new Date(nextRun.getTime() + 1000));
+      });
+  }, delay);
 }
 
 /**
@@ -389,6 +618,7 @@ export async function start(): Promise<void> {
     }
   }
 
+  scheduleWeeklyUploadReminder();
   console.log(`[bridge-manager] Bridge started with ${startedCount} adapter(s)`);
 }
 
@@ -402,6 +632,8 @@ export async function stop(): Promise<void> {
   const { lifecycle } = getBridgeContext();
 
   state.running = false;
+
+  clearWeeklyUploadReminderTimer();
 
   // Abort all event loops
   for (const [, abort] of state.loopAborts) {
@@ -919,7 +1151,7 @@ async function handleCommand(
         '/model &lt;name&gt; - 切换到指定模型',
         '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
         '/gpt code - 切换到 gpt-5.3-codex',
-        '/prompt scopes|get|set|clear - 管理作用域 Prompt',
+        '/prompt - 查看和管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
         // '/bind &lt;session_id&gt; - 绑定已有会话',
@@ -1033,6 +1265,66 @@ async function handleCommand(
       break;
     }
 
+    case '/prompt': {
+      const resolvedScope = resolveAddressScope(msg.address);
+      const activeScopeKey = resolvedScope.scopeKey;
+      const { subcommand, content } = parsePromptCommand(args);
+
+      if (!subcommand || subcommand === 'help') {
+        response = buildPromptOverviewText(
+          resolvedScope.inheritedScopeKeys,
+          activeScopeKey,
+          (scopeKey) => store.getScopedSystemPrompt(scopeKey)?.prompt ?? null,
+        );
+        break;
+      }
+
+      if (subcommand === 'set') {
+        if (!content) {
+          response = [
+            '未设置 Prompt 内容。',
+            '',
+            '请在 <code>/prompt set</code> 后面直接写要设置的提示词。',
+            '示例：<code>/prompt set 请在每次回复结尾加上🐢</code>',
+          ].join('\n');
+          break;
+        }
+
+        const scopeType = inferScopeType(activeScopeKey);
+        const channelType = inferChannelTypeForScope(activeScopeKey, msg.address.channelType);
+        const saved = store.upsertScopedSystemPrompt({
+          scopeKey: activeScopeKey,
+          channelType,
+          scopeType,
+          prompt: content,
+        });
+
+        response = [
+          '已保存当前作用域 Prompt。',
+          `作用域：<code>${escapeHtml(saved.scopeKey)}</code>`,
+          '',
+          '新规则会从下一条消息开始生效。',
+        ].join('\n');
+        break;
+      }
+
+      if (subcommand === 'clear') {
+        const deleted = store.deleteScopedSystemPrompt(activeScopeKey);
+        if (deleted) {
+          response = `已清空当前作用域 Prompt：<code>${escapeHtml(activeScopeKey)}</code>`;
+        } else {
+          response = `当前作用域尚未配置 Prompt：<code>${escapeHtml(activeScopeKey)}</code>`;
+        }
+        break;
+      }
+
+      response = [
+        `未识别的 /prompt 子命令：<code>${escapeHtml(subcommand)}</code>`,
+        '',
+        '当前仅支持 <code>/prompt</code>、<code>/prompt set</code>、<code>/prompt clear</code>。',
+      ].join('\n');
+      break;
+    }
     case '/sonnet':
     case '/opus':
     case '/pro':
@@ -1142,7 +1434,7 @@ async function handleCommand(
         '/model &lt;name&gt; - 切换到指定模型',
         '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
         '/gpt code - 切换到 gpt-5.3-codex',
-        '/prompt scopes|get|set|clear - 管理作用域 Prompt',
+        '/prompt - 查看和管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
         // '/bind &lt;session_id&gt; - 绑定已有会话',
@@ -1195,3 +1487,15 @@ export function computeSdkSessionUpdate(
 // without wiring up the full adapter loop.
 /** @internal */
 export const _testOnly = { handleMessage };
+
+/** @internal */
+export const _internals = {
+  isMondayTenAm,
+  getNextWeeklyUploadReminderTime,
+  getUploadReminderDedupKey,
+  getUploadDirForBinding,
+  countUploadFiles,
+  runWeeklyUploadReminderCheck,
+  scheduleWeeklyUploadReminder,
+  clearWeeklyUploadReminderTimer,
+};

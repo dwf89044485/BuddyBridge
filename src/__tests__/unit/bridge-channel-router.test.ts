@@ -19,9 +19,14 @@ import type { ChannelBinding } from '../../lib/bridge/types';
 
 // ── Mock Store ──────────────────────────────────────────────
 
+function createBindingStorageKey(channelType: string, chatId: string, scopeKey: string): string {
+  return `${channelType}:${chatId}:${scopeKey}`;
+}
+
 function createMockStore(): BridgeStore & { bindings: Map<string, ChannelBinding>; sessions: Map<string, { id: string; working_directory: string; model: string }> } {
   const bindings = new Map<string, ChannelBinding>();
   const sessions = new Map<string, { id: string; working_directory: string; model: string }>();
+  const scopedPrompts = new Map<string, { id: string; scopeKey: string; channelType: string; scopeType: string; prompt: string; createdAt: string; updatedAt: string }>();
   let nextId = 1;
 
   return {
@@ -33,24 +38,39 @@ function createMockStore(): BridgeStore & { bindings: Map<string, ChannelBinding
       if (key === 'bridge_default_provider_id') return '';
       return null;
     },
-    getChannelBinding(channelType: string, chatId: string) {
-      return bindings.get(`${channelType}:${chatId}`) ?? null;
+    getChannelBinding(channelType: string, chatId: string, scopeKey?: string) {
+      if (scopeKey) {
+        const direct = bindings.get(createBindingStorageKey(channelType, chatId, scopeKey));
+        if (direct) return direct;
+      }
+      for (const binding of bindings.values()) {
+        if (binding.channelType === channelType && binding.chatId === chatId) {
+          return binding;
+        }
+      }
+      return null;
     },
     upsertChannelBinding(data) {
+      const scopeKey = data.scopeKey || `${data.channelType}:chat:${data.chatId}`;
+      const key = createBindingStorageKey(data.channelType, data.chatId, scopeKey);
+      const existing = bindings.get(key);
+      const now = new Date().toISOString();
       const binding: ChannelBinding = {
-        id: `binding-${nextId++}`,
+        id: existing?.id || `binding-${nextId++}`,
         channelType: data.channelType,
         chatId: data.chatId,
         codepilotSessionId: data.codepilotSessionId,
-        sdkSessionId: '',
+        sdkSessionId: data.sdkSessionId ?? existing?.sdkSessionId ?? '',
         workingDirectory: data.workingDirectory,
         model: data.model,
-        mode: 'code',
-        active: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        mode: (data.mode as ChannelBinding['mode']) || existing?.mode || 'code',
+        scopeKey,
+        scopeChain: data.scopeChain || existing?.scopeChain || [{ kind: 'chat', id: data.chatId }],
+        active: existing?.active ?? true,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
       };
-      bindings.set(`${data.channelType}:${data.chatId}`, binding);
+      bindings.set(key, binding);
       return binding;
     },
     updateChannelBinding(id: string, updates: Partial<ChannelBinding>) {
@@ -65,10 +85,30 @@ function createMockStore(): BridgeStore & { bindings: Map<string, ChannelBinding
       const all = Array.from(bindings.values());
       return channelType ? all.filter(b => b.channelType === channelType) : all;
     },
+    getScopedSystemPrompt(scopeKey: string) {
+      return scopedPrompts.get(scopeKey) || null;
+    },
+    upsertScopedSystemPrompt(data) {
+      const now = new Date().toISOString();
+      const existing = scopedPrompts.get(data.scopeKey);
+      const next = existing
+        ? { ...existing, channelType: data.channelType, scopeType: data.scopeType, prompt: data.prompt, updatedAt: now }
+        : { id: `sp-${nextId++}`, scopeKey: data.scopeKey, channelType: data.channelType, scopeType: data.scopeType, prompt: data.prompt, createdAt: now, updatedAt: now };
+      scopedPrompts.set(data.scopeKey, next);
+      return next;
+    },
+    deleteScopedSystemPrompt(scopeKey: string) {
+      return scopedPrompts.delete(scopeKey);
+    },
+    listScopedSystemPrompts(channelType?: string) {
+      const all = Array.from(scopedPrompts.values());
+      if (!channelType) return all;
+      return all.filter((item) => item.channelType === channelType || item.channelType === 'global');
+    },
     getSession(id: string) {
       return sessions.get(id) ?? null;
     },
-    createSession(name: string, model: string, _systemPrompt?: string, cwd?: string) {
+    createSession(_name: string, model: string, _systemPrompt?: string, cwd?: string) {
       const session = { id: `session-${nextId++}`, working_directory: cwd || '', model };
       sessions.set(session.id, session);
       return session;
@@ -141,7 +181,6 @@ describe('channel-router', () => {
   });
 
   it('resolve() returns existing binding when session exists', () => {
-    // Create initial binding
     const first = router.resolve({ channelType: 'telegram', chatId: '123' });
     const second = router.resolve({ channelType: 'telegram', chatId: '123' });
 
@@ -151,7 +190,6 @@ describe('channel-router', () => {
 
   it('resolve() recreates binding when session was deleted', () => {
     const first = router.resolve({ channelType: 'telegram', chatId: '123' });
-    // Delete the session
     store.sessions.delete(first.codepilotSessionId);
 
     const second = router.resolve({ channelType: 'telegram', chatId: '123' });
@@ -200,7 +238,7 @@ describe('channel-router', () => {
     const binding = router.createBinding({ channelType: 'telegram', chatId: '1' });
     router.updateBinding(binding.id, { mode: 'plan' });
 
-    const updated = store.bindings.get('telegram:1');
+    const updated = Array.from(store.bindings.values()).find((item) => item.id === binding.id);
     assert.equal(updated?.mode, 'plan');
   });
 });
