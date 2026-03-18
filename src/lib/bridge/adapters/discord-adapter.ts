@@ -499,14 +499,17 @@ export class DiscordAdapter extends BaseChannelAdapter {
       text = '/' + text.slice(1);
     }
 
-    // Handle attachments (images)
+    // Handle attachments
     const attachments: FileAttachment[] = [];
     const imageEnabled = getBridgeContext().store.getSetting('bridge_discord_image_enabled') !== 'false';
     const maxSize = parseInt(getBridgeContext().store.getSetting('bridge_discord_max_attachment_size') || '', 10) || DEFAULT_MAX_ATTACHMENT_SIZE;
 
-    if (imageEnabled && message.attachments.size > 0) {
+    if (message.attachments.size > 0) {
       for (const [, attachment] of message.attachments) {
-        if (!attachment.contentType?.startsWith('image/')) continue;
+        const contentType = attachment.contentType || 'application/octet-stream';
+        const isImage = contentType.startsWith('image/');
+
+        if (isImage && !imageEnabled) continue;
         if (attachment.size > maxSize) {
           console.warn(`[discord-adapter] Attachment too large (${attachment.size} > ${maxSize}), skipping`);
           continue;
@@ -522,8 +525,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
           attachments.push({
             id,
-            name: attachment.name || `image.${attachment.contentType?.split('/')[1] || 'png'}`,
-            type: attachment.contentType || 'image/png',
+            name: attachment.name || (isImage ? `image.${contentType.split('/')[1] || 'png'}` : 'attachment'),
+            type: contentType,
             size: buffer.length,
             data: base64,
           });

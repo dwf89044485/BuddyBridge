@@ -303,6 +303,10 @@ describe('conversation-engine scoped prompts', () => {
     assert.equal(capturedParams!.files![0].name, '需求说明.txt');
     assert.ok(capturedParams!.files![0].filePath, 'non-image filePath should be attached after persistence');
     assert.match(capturedParams!.files![0].filePath!, /\.uploads\//);
+    assert.match(capturedParams!.files![0].filePath!, new RegExp(`\.uploads/${session.id}/`));
+    assert.match(capturedParams!.prompt, /用户上传了以下附件/);
+    assert.match(capturedParams!.prompt, /请先使用读文件工具按路径读取这些文件/);
+    assert.match(capturedParams!.prompt, /需求说明/);
     assert.equal(capturedParams!.files![1].name, '示意图.png');
     assert.equal(capturedParams!.files![1].filePath, undefined);
   });

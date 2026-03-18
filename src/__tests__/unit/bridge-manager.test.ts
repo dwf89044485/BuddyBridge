@@ -329,6 +329,59 @@ describe('bridge-manager weekly upload reminder', () => {
   });
 });
 
+describe('bridge-manager attachment prompt selection', () => {
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)['__bridge_manager__'];
+    delete (globalThis as Record<string, unknown>)['__bridge_context__'];
+  });
+
+  it('does not use image fallback prompt for file-only attachments', async () => {
+    const store = createModelSwitchStore({
+      bridge_default_model: 'gpt-5.4',
+    });
+
+    let capturedPrompt = '';
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: (params) => {
+          capturedPrompt = params.prompt;
+          return new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue('data: {"type":"text","data":"ok"}\n');
+              controller.enqueue('data: {"type":"result","data":"{\\"usage\\":{\\"input_tokens\\":1,\\"output_tokens\\":1},\\"is_error\\":false}"}\n');
+              controller.close();
+            },
+          });
+        },
+      },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-file-only',
+      address: { channelType: 'qq', chatId: 'chat-file-only', userId: 'user-1' },
+      text: '',
+      timestamp: Date.now(),
+      attachments: [{
+        id: 'file-1',
+        name: '说明.txt',
+        type: 'text/plain',
+        size: 5,
+        data: Buffer.from('hello').toString('base64'),
+      }],
+    });
+
+    assert.doesNotMatch(capturedPrompt, /Describe this image\./);
+    assert.match(capturedPrompt, /用户上传了以下附件/);
+    assert.match(capturedPrompt, /说明/);
+  });
+});
 
 describe('bridge-manager prompt commands', () => {
   beforeEach(() => {

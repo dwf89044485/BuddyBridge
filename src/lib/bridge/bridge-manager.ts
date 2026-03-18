@@ -1017,7 +1017,9 @@ async function handleMessage(
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
-    const promptText = text || (hasAttachments ? 'Describe this image.' : '');
+    const imageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+    const hasOnlyImages = Boolean(hasAttachments && msg.attachments?.every((file) => imageMimeTypes.has(file.type)));
+    const promptText = text || (hasOnlyImages ? 'Describe this image.' : hasAttachments ? '请先读取并处理用户上传的附件。' : '');
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       await broker.forwardPermissionRequest(

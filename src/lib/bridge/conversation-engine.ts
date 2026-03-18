@@ -19,6 +19,71 @@ import { getBridgeContext } from './context.js';
 import crypto from 'crypto';
 import { formatScopeRuleTitle, resolveScope } from './scope-utils.js';
 
+const UPLOAD_DIRECTORY_NAME = '.uploads';
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+
+function isImageAttachment(file: Pick<FileAttachment, 'type'>): boolean {
+  return IMAGE_MIME_TYPES.has(file.type);
+}
+
+function sanitizeAttachmentFilename(name: string): string {
+  const baseName = path.basename((name || '').trim()) || 'attachment';
+  const sanitized = baseName
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^\.+/, '');
+
+  return sanitized || 'attachment';
+}
+
+type PersistedAttachmentMeta = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  filePath: string;
+};
+
+function buildAttachmentPromptFromMeta(files: PersistedAttachmentMeta[]): string {
+  if (files.length === 0) return '';
+
+  return [
+    '用户上传了以下附件，文件已经保存到当前工作目录。',
+    '请先使用读文件工具按路径读取这些文件，再基于文件内容继续处理。',
+    ...files.map((file) => `- ${file.name}: ${file.filePath}`),
+  ].join('\n');
+}
+
+function persistNonImageAttachments(
+  workDir: string,
+  sessionId: string,
+  files: FileAttachment[],
+): PersistedAttachmentMeta[] {
+  const uploadDir = path.join(path.resolve(workDir), UPLOAD_DIRECTORY_NAME, sessionId);
+  fs.mkdirSync(uploadDir, { recursive: true });
+
+  return files.map((file, index) => {
+    const safeName = sanitizeAttachmentFilename(file.name);
+    const uniquePrefix = `${Date.now()}-${index + 1}-${crypto.randomUUID().slice(0, 8)}`;
+    const filePath = path.resolve(uploadDir, `${uniquePrefix}-${safeName}`);
+
+    if (filePath !== uploadDir && !filePath.startsWith(`${uploadDir}${path.sep}`)) {
+      throw new Error(`Resolved upload path escaped upload directory: ${filePath}`);
+    }
+
+    const buffer = Buffer.from(file.data, 'base64');
+    fs.writeFileSync(filePath, buffer);
+
+    return {
+      id: file.id,
+      name: file.name,
+      type: file.type,
+      size: buffer.length,
+      filePath,
+    };
+  });
+}
+
 export interface PermissionRequestInfo {
   permissionRequestId: string;
   toolName: string;
@@ -72,7 +137,6 @@ export async function processMessage(
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
-  const imageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
 
   // Acquire session lock
   const lockId = crypto.randomBytes(8).toString('hex');
@@ -103,38 +167,37 @@ export async function processMessage(
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
     let runtimeFiles = files;
+    let attachmentPrompt = '';
     if (files && files.length > 0) {
-      const nonImageFiles = files.filter((file) => !imageMimeTypes.has(file.type));
+      const nonImageFiles = files.filter((file) => !isImageAttachment(file));
       const workDir = binding.workingDirectory || session?.working_directory || '';
       if (workDir && nonImageFiles.length > 0) {
         try {
-          const uploadDir = path.join(workDir, '.uploads');
-          if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-          }
-          const fileMeta = nonImageFiles.map((f) => {
-            const safeName = path.basename(f.name).replace(/[^a-zA-Z0-9._-]/g, '_');
-            const filePath = path.join(uploadDir, `${Date.now()}-${safeName}`);
-            const buffer = Buffer.from(f.data, 'base64');
-            fs.writeFileSync(filePath, buffer);
-            return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
-          });
+          const fileMeta = persistNonImageAttachments(workDir, sessionId, nonImageFiles);
           runtimeFiles = files.map((file) => {
             const persisted = fileMeta.find((meta) => meta.id === file.id);
             return persisted ? { ...file, filePath: persisted.filePath, size: persisted.size } : file;
           });
+          attachmentPrompt = buildAttachmentPromptFromMeta(fileMeta);
           if (fileMeta.length > 0) {
             savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
           }
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} attachment(s) attached] ${text}`;
+          savedContent = `[${files.length} attachment(s) attached] ${text}`.trim();
         }
-      } else if (!workDir) {
-        savedContent = `[${files.length} image(s) attached] ${text}`;
+      } else if (!workDir && nonImageFiles.length > 0) {
+        savedContent = `[${nonImageFiles.length} attachment(s) attached] ${text}`.trim();
+      } else if (text.trim().length === 0) {
+        const imageCount = files.filter((file) => isImageAttachment(file)).length;
+        savedContent = `[${imageCount} image(s) attached]`;
       }
     }
     store.addMessage(sessionId, 'user', savedContent);
+
+    const effectivePromptText = attachmentPrompt
+      ? [text, attachmentPrompt].filter((part) => part && part.trim()).join('\n\n')
+      : text;
 
     // Resolve provider
     let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
@@ -211,7 +274,7 @@ export async function processMessage(
         : layeredSection;
     }
     const stream = llm.streamChat({
-      prompt: text,
+      prompt: effectivePromptText,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
