@@ -1,5 +1,7 @@
 import type { ToolCallInfo } from '../types.js';
 
+export const FEISHU_STREAMING_ELEMENT_ID = 'streaming_content';
+
 /**
  * Feishu-specific Markdown processing.
  *
@@ -121,7 +123,7 @@ export function formatElapsed(ms: number): string {
  * Combines main text content with tool progress.
  */
 export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
-  let content = text || '';
+  let content = preprocessFeishuMarkdown(text || '');
   const toolMd = buildToolProgressMarkdown(tools);
   if (toolMd) {
     content = content ? `${content}\n\n${toolMd}` : toolMd;

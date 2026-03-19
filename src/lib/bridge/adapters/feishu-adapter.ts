@@ -37,6 +37,7 @@ import {
   buildFinalCardJson,
   buildPermissionButtonCard,
   formatElapsed,
+  FEISHU_STREAMING_ELEMENT_ID,
 } from '../markdown/feishu.js';
 
 /** Max number of message_ids to keep for dedup. */
@@ -110,6 +111,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private restClient: lark.Client | null = null;
   private seenMessageIds = new Map<string, boolean>();
   private botOpenId: string | null = null;
+  private appId = '';
+  private appSecret = '';
+  private domain: lark.Domain = lark.Domain.Feishu;
+  private tenantAccessToken: { token: string; expiresAt: number } | null = null;
   /** All known bot IDs (open_id, user_id, union_id) for mention matching. */
   private botIds = new Set<string>();
   /** Track last incoming message ID per chat for typing indicator. */
@@ -138,6 +143,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const domain = domainSetting === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
+
+    this.appId = appId;
+    this.appSecret = appSecret;
+    this.domain = domain;
+    this.tenantAccessToken = null;
 
     // Create REST client
     this.restClient = new lark.Client({
@@ -209,6 +219,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       this.wsClient = null;
     }
     this.restClient = null;
+    this.appId = '';
+    this.appSecret = '';
+    this.tenantAccessToken = null;
 
     // Reject all waiting consumers
     for (const waiter of this.waiters) {
@@ -392,7 +405,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
             content: '💭 Thinking...',
             text_align: 'left',
             text_size: 'normal',
-            element_id: 'streaming_content',
+            element_id: FEISHU_STREAMING_ELEMENT_ID,
           }],
         },
       };
@@ -499,10 +512,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const cardId = state.cardId;
 
     // Fire-and-forget — streaming updates are non-critical
-    (this.restClient as any).cardkit.v2.card.streamContent({
-      path: { card_id: cardId },
-      data: { content, sequence: seq },
-    }).then(() => {
+    this.streamCardElementContent(cardId, content, seq).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
       console.warn('[feishu-adapter] streamContent failed:', err instanceof Error ? err.message : err);
@@ -1194,9 +1204,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     domain: lark.Domain,
   ): Promise<void> {
     try {
-      const baseUrl = domain === lark.Domain.Lark
-        ? 'https://open.larksuite.com'
-        : 'https://open.feishu.cn';
+      const baseUrl = this.getFeishuBaseUrl(domain);
 
       const tokenRes = await fetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
         method: 'POST',
@@ -1370,6 +1378,68 @@ export class FeishuAdapter extends BaseChannelAdapter {
         this.seenMessageIds.delete(key);
         removed++;
       }
+    }
+  }
+
+  private getFeishuBaseUrl(domain = this.domain): string {
+    return domain === lark.Domain.Lark
+      ? 'https://open.larksuite.com'
+      : 'https://open.feishu.cn';
+  }
+
+  private async getTenantAccessToken(): Promise<string | null> {
+    if (!this.appId || !this.appSecret) return null;
+
+    const now = Date.now();
+    if (this.tenantAccessToken && this.tenantAccessToken.expiresAt > now + 30_000) {
+      return this.tenantAccessToken.token;
+    }
+
+    const response = await fetch(`${this.getFeishuBaseUrl()}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: this.appId, app_secret: this.appSecret }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const data: any = await response.json().catch(() => null);
+    if (!response.ok || !data?.tenant_access_token) {
+      const errorMsg = data?.msg || `HTTP ${response.status}`;
+      console.warn('[feishu-adapter] Failed to refresh tenant access token:', errorMsg);
+      return null;
+    }
+
+    const expire = typeof data.expire === 'number' ? data.expire : 7200;
+    this.tenantAccessToken = {
+      token: data.tenant_access_token,
+      expiresAt: now + Math.max(expire - 60, 60) * 1000,
+    };
+    return this.tenantAccessToken.token;
+  }
+
+  private async streamCardElementContent(cardId: string, content: string, sequence: number): Promise<void> {
+    const token = await this.getTenantAccessToken();
+    if (!token) {
+      throw new Error('tenant access token unavailable');
+    }
+
+    const response = await fetch(
+      `${this.getFeishuBaseUrl()}/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}/elements/${encodeURIComponent(FEISHU_STREAMING_ELEMENT_ID)}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ content, sequence }),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+
+    const data: any = await response.json().catch(() => null);
+    if (!response.ok || (typeof data?.code === 'number' && data.code !== 0)) {
+      const errorMsg = data?.msg || `HTTP ${response.status}`;
+      throw new Error(errorMsg);
     }
   }
 }
