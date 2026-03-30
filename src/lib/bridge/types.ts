@@ -87,15 +87,36 @@ export interface OutboundMessage {
   inlineButtons?: InlineButton[][];
   /** If replying to a specific message */
   replyToMessageId?: string;
+  /** Discord Embed raw JSON (sent as embeds array element) */
+  embed?: Record<string, unknown>;
+  /** Feishu Card JSON (sent directly as card message, bypasses markdown render) */
+  feishuCard?: Record<string, unknown>;
+  /** Select Menu dropdown descriptor (Discord StringSelectMenu / Feishu select_static) */
+  selectMenu?: SelectMenuConfig;
 }
 
 /** Inline keyboard button for permission prompts */
 export interface InlineButton {
   text: string;
   callbackData: string;
+  /** Visual style hint for platforms that support multiple button colors (Discord) */
+  style?: 'primary' | 'success' | 'danger' | 'secondary';
 }
 
-/** Result of sending a message via an adapter */
+/** Option for a Select Menu dropdown */
+export interface SelectMenuOption {
+  label: string;
+  value: string;
+  description?: string;
+}
+
+/** Select Menu dropdown descriptor */
+export interface SelectMenuConfig {
+  /** Identifier used to route the callback (e.g. "select:model") */
+  customId: string;
+  placeholder?: string;
+  options: SelectMenuOption[];
+}
 export interface SendResult {
   ok: boolean;
   /** Platform-specific message ID of the sent message */
@@ -127,7 +148,9 @@ export interface ChannelBinding {
   /** Model override for this binding */
   model: string;
   /** Chat mode */
-  mode: 'code' | 'plan' | 'ask';
+  mode: 'code' | 'plan' | 'ask' | 'bypass';
+  /** Current runtime/provider in use */
+  runtime?: string;
   /** Optional active scope key, e.g. discord:thread:123 */
   scopeKey?: string;
   /** Optional scope chain from broad to narrow */

@@ -235,3 +235,208 @@ export function buildPermissionButtonCard(
     },
   });
 }
+
+// ── Interactive Command Cards ───────────────────────────────────
+
+export function buildStatusCard(
+  binding: { codepilotSessionId: string; workingDirectory: string; model: string; mode: string; runtime?: string; taskStatus?: string },
+  modelOptions?: Array<{ label: string; value: string }>,
+  runtimeOptions?: Array<{ label: string; value: string }>,
+  promptInfo?: { activeScopeKey: string; effectiveScopeKey: string | null; hasEffectivePrompt: boolean },
+): Record<string, unknown> {
+  const modeButtons = (['plan', 'code', 'ask'] as const).map((mode) => ({
+    tag: 'button' as const,
+    text: { tag: 'plain_text' as const, content: mode.toUpperCase() },
+    type: mode === binding.mode ? 'primary' as const : 'default' as const,
+    value: { callback_data: `cmd:mode:${mode}`, chatId: '' },
+  }));
+
+  const promptButtons = [
+    {
+      tag: 'button' as const,
+      text: { tag: 'plain_text' as const, content: '设置 Prompt' },
+      type: 'primary' as const,
+      value: { callback_data: 'cmd:prompt:set', chatId: '' },
+    },
+    {
+      tag: 'button' as const,
+      text: { tag: 'plain_text' as const, content: '查看 Prompt' },
+      type: 'default' as const,
+      value: { callback_data: 'cmd:prompt:show', chatId: '' },
+    },
+    {
+      tag: 'button' as const,
+      text: { tag: 'plain_text' as const, content: '清空 Prompt' },
+      type: 'default' as const,
+      value: { callback_data: 'cmd:prompt:clear', chatId: '' },
+    },
+  ];
+
+  const modelSelect = modelOptions && modelOptions.length > 0
+    ? {
+      tag: 'select_static' as const,
+      placeholder: '选择要切换的模型',
+      options: modelOptions.map((m) => ({ text: m.label, value: `cmd:model:${m.value}` })),
+    }
+    : null;
+
+  const runtimeSelect = runtimeOptions && runtimeOptions.length > 0
+    ? {
+      tag: 'select_static' as const,
+      placeholder: '选择要切换的 Runtime',
+      options: runtimeOptions.map((m) => ({ text: m.label, value: `cmd:runtime:${m.value}` })),
+    }
+    : null;
+
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '📊 会话状态' },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: [
+            '**Session**',
+            `Session ID: \`${binding.codepilotSessionId}\``,
+            `Runtime: ${binding.runtime || 'unknown'}`,
+            `CWD: ${binding.workingDirectory || '~'}`,
+          ].join('\n'),
+        },
+        {
+          tag: 'markdown',
+          content: [
+            '**Model**',
+            `Current Model: ${binding.model || binding.runtime || 'unknown'}`,
+          ].join('\n'),
+        },
+        ...(modelSelect ? [modelSelect] : []),
+        {
+          tag: 'markdown',
+          content: [
+            '**Runtime**',
+            `Current Runtime: ${binding.runtime || 'unknown'}`,
+          ].join('\n'),
+        },
+        ...(runtimeSelect ? [runtimeSelect] : []),
+        {
+          tag: 'markdown',
+          content: [
+            '**Mode**',
+            `Current Mode: ${binding.mode}`,
+          ].join('\n'),
+        },
+        { tag: 'action', actions: modeButtons },
+        {
+          tag: 'markdown',
+          content: [
+            '**Prompt**',
+            `Active Scope: \`${promptInfo?.activeScopeKey || 'unknown'}\``,
+            `Prompt Source: \`${promptInfo?.effectiveScopeKey || 'none'}\``,
+            `Prompt Status: ${promptInfo?.hasEffectivePrompt ? '已配置' : '未配置'}`,
+          ].join('\n'),
+        },
+        { tag: 'action', actions: promptButtons },
+      ],
+    },
+  };
+}
+
+export function buildModeCard(currentMode: string): Record<string, unknown> {
+  const modes = ['plan', 'code', 'ask', 'bypass'] as const;
+  const modeLabels: Record<string, string> = { plan: '📋 Plan', code: '💻 Code', ask: '💬 Ask', bypass: '🔓 Bypass' };
+
+  const buttons = modes.map((mode) => ({
+    tag: 'button' as const,
+    text: { tag: 'plain_text' as const, content: modeLabels[mode] },
+    type: mode === currentMode ? 'primary' as const : 'default' as const,
+    value: { callback_data: `cmd:mode:${mode}`, chatId: '' },
+  }));
+
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '⚙️ 切换模式' },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: `当前模式：**${currentMode.charAt(0).toUpperCase() + currentMode.slice(1)}**\n\n选择新模式：`,
+        },
+        { tag: 'hr' },
+        {
+          tag: 'action',
+          actions: buttons,
+        },
+      ],
+    },
+  };
+}
+
+export function buildModelPickerCard(
+  currentModel: string,
+  modelOptions: Array<{ label: string; value: string }>,
+): Record<string, unknown> {
+  const options = modelOptions.map((m) => ({
+    text: m.label,
+    value: `cmd:model:${m.value}`,
+  }));
+
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '🤖 模型切换' },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: `当前模型：**${currentModel || 'unknown'}**\n\n选择要切换的模型：`,
+        },
+        { tag: 'hr' },
+        {
+          tag: 'select_static',
+          placeholder: '选择模型',
+          options,
+        },
+      ],
+    },
+  };
+}
+
+export function buildHelpCard(shortcutLine: string, shortcutExample: string): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '📖 BuddyBridge 命令' },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: [
+            '**💬 会话管理**',
+            '`/new` - 新建会话  `/status` - 查看状态  `/stop` - 停止任务  `/cwd` - 修改目录',
+            '',
+            '**⚙️ 配置**',
+            '`/model` - 切换模型  `/mode` - 切换模式  `/prompt` - 管理 Prompt',
+            '',
+            '**🤖 快捷切换模型**',
+            shortcutLine,
+            shortcutExample,
+          ].join('\n'),
+        },
+      ],
+    },
+  };
+}

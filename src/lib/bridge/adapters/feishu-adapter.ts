@@ -319,12 +319,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     try {
       const event = data as any;
-      const value = event?.action?.value ?? {};
-      const callbackData = value.callback_data;
+      const rawValue = event?.action?.value ?? {};
+      // Buttons have value as object { callback_data: ..., chatId: ... }
+      // Select menus have value as string directly
+      const callbackData = typeof rawValue === 'string'
+        ? rawValue
+        : rawValue?.callback_data;
       if (!callbackData) return FALLBACK_TOAST;
 
       // Extract chat/user context
-      const chatId = event?.context?.open_chat_id || value.chatId || '';
+      const chatId = event?.context?.open_chat_id || (typeof rawValue === 'object' ? rawValue?.chatId : '') || '';
       const messageId = event?.context?.open_message_id || event?.open_message_id || '';
       const userId = event?.operator?.open_id || event?.open_id || '';
 
@@ -634,6 +638,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
+    // Direct card JSON — bypass all markdown rendering
+    if (message.feishuCard) {
+      return this.sendRawCard(message.address.chatId, message.feishuCard, message.replyToMessageId);
+    }
+
     let text = message.text;
 
     // Convert HTML to markdown for Feishu rendering (e.g. command responses)
@@ -658,6 +667,36 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return this.sendAsCard(message.address.chatId, text);
     }
     return this.sendAsPost(message.address.chatId, text);
+  }
+
+  /**
+   * Send a pre-built card JSON directly (bypasses markdown rendering).
+   * Used for interactive command cards (status, mode picker, model picker).
+   */
+  private async sendRawCard(
+    chatId: string,
+    cardJson: Record<string, unknown>,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    const content = JSON.stringify(cardJson);
+    try {
+      const data = {
+        receive_id: chatId,
+        msg_type: 'interactive',
+        content,
+      };
+      const res = await this.restClient!.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data,
+      });
+      if (res?.data?.message_id) {
+        return { ok: true, messageId: res.data.message_id };
+      }
+      console.warn('[feishu-adapter] Raw card send failed:', res?.msg, res?.code);
+    } catch (err) {
+      console.warn('[feishu-adapter] Raw card send error:', err instanceof Error ? err.message : err);
+    }
+    return { ok: false, error: 'Failed to send card' };
   }
 
   /**

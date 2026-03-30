@@ -20,6 +20,7 @@ export interface BridgeContext {
   llm: LLMProvider;
   permissions: PermissionGateway;
   lifecycle: LifecycleHooks;
+  runtime?: string;
 }
 
 const CONTEXT_KEY = '__bridge_context__';

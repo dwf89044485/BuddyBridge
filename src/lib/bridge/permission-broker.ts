@@ -102,9 +102,9 @@ export async function forwardPermissionRequest(
       parseMode: 'HTML',
       inlineButtons: [
         [
-          { text: 'Allow', callbackData: `perm:allow:${permissionRequestId}` },
-          { text: 'Allow Session', callbackData: `perm:allow_session:${permissionRequestId}` },
-          { text: 'Deny', callbackData: `perm:deny:${permissionRequestId}` },
+          { text: 'Allow', callbackData: `perm:allow:${permissionRequestId}`, style: 'success' },
+          { text: 'Allow Session', callbackData: `perm:allow_session:${permissionRequestId}`, style: 'success' },
+          { text: 'Deny', callbackData: `perm:deny:${permissionRequestId}`, style: 'danger' },
         ],
       ],
       replyToMessageId,

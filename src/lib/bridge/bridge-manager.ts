@@ -21,6 +21,7 @@ import * as broker from './permission-broker.js';
 import { deliver, deliverRendered } from './delivery-layer.js';
 import { markdownToTelegramChunks } from './markdown/telegram.js';
 import { markdownToDiscordChunks } from './markdown/discord.js';
+import { buildStatusCard, buildModeCard, buildModelPickerCard, buildHelpCard } from './markdown/feishu.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 import { resolveScope } from './scope-utils.js';
@@ -77,6 +78,23 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   return { intervalMs, minDeltaChars, maxChars };
 }
 
+function formatRuntimeLabel(runtime?: string): string {
+  switch (runtime) {
+    case 'persistent-claude':
+    case 'claude':
+      return 'Claude Code';
+    case 'codebuddysdk':
+    case 'codebuddy':
+      return 'CodeBuddy';
+    case 'codex':
+      return 'Codex';
+    case 'auto':
+      return 'Auto';
+    default:
+      return runtime || 'unknown';
+  }
+}
+
 /**
  * Check if a message looks like a numeric permission shortcut (1/2/3) for
  * feishu/qq channels WITH at least one pending permission in that chat.
@@ -118,9 +136,53 @@ function flushPreview(
   });
 }
 
-type ModelShortcutName = 'sonnet' | 'opus' | 'pro' | 'flash' | 'gpt' | 'gpt_code' | 'glm' | 'minimax' | 'kimi';
+type ModelShortcutName = 'sonnet' | 'opus' | 'haiku' | 'pro' | 'flash' | 'gpt' | 'gpt_code' | 'glm' | 'minimax' | 'kimi';
 
-type ShortcutCommand = '/sonnet' | '/opus' | '/pro' | '/flash' | '/gpt' | '/gpt code' | '/glm' | '/minimax' | '/kimi';
+type ShortcutCommand = '/sonnet' | '/opus' | '/haiku' | '/pro' | '/flash' | '/gpt' | '/gpt code' | '/glm' | '/minimax' | '/kimi';
+
+type RuntimeKind = 'claude' | 'codebuddy' | 'codex';
+
+interface ModelOption {
+  label: string;
+  value: string;
+  description?: string;
+}
+
+const MODE_MENU_OPTIONS: ModelOption[] = [
+  { label: '📋 Plan', value: 'plan', description: '规划优先' },
+  { label: '💻 Code', value: 'code', description: '编码优先' },
+  { label: '💬 Ask', value: 'ask', description: '问答优先' },
+  { label: '🔓 Bypass', value: 'bypass', description: '跳过权限检查' },
+];
+
+const RUNTIME_MENU_OPTIONS: ModelOption[] = [
+  { label: 'Claude Code', value: 'persistent-claude', description: 'Anthropic CLI' },
+  { label: 'CodeBuddy', value: 'codebuddysdk', description: 'Tencent CodeBuddy' },
+  { label: 'Codex', value: 'codex', description: 'OpenAI Codex' },
+  { label: 'Auto', value: 'auto', description: '自动选择' },
+];
+
+function buildDiscordSelectMenuMessage(
+  address: ChannelAddress,
+  replyToMessageId: string,
+  title: string,
+  currentLine: string,
+  customId: string,
+  placeholder: string,
+  options: ModelOption[],
+): OutboundMessage {
+  return {
+    address,
+    text: `${title}\n${currentLine}\n请选择：`,
+    parseMode: 'Markdown',
+    selectMenu: {
+      customId,
+      placeholder,
+      options,
+    },
+    replyToMessageId,
+  };
+}
 
 const MODEL_SHORTCUTS: Array<{
   command: ShortcutCommand;
@@ -129,26 +191,88 @@ const MODEL_SHORTCUTS: Array<{
 }> = [
   { command: '/sonnet', alias: 'sonnet', model: 'claude-sonnet-4.6' },
   { command: '/opus', alias: 'opus', model: 'claude-opus-4.6' },
+  { command: '/haiku', alias: 'haiku', model: 'claude-haiku-4.5' },
   { command: '/pro', alias: 'pro', model: 'gemini-3.1-pro' },
   { command: '/flash', alias: 'flash', model: 'gemini-3.1-flash-lite' },
   { command: '/gpt', alias: 'gpt', model: 'gpt-5.4' },
   { command: '/gpt code', alias: 'gpt_code', model: 'gpt-5.3-codex' },
-  { command: '/glm', alias: 'glm', model: 'glm-5.0-ioa' },
-  { command: '/minimax', alias: 'minimax', model: 'minimax-m2.5-ioa' },
+  { command: '/glm', alias: 'glm', model: 'glm-5.0-turbo' },
+  { command: '/minimax', alias: 'minimax', model: 'minimax-m2.7' },
   { command: '/kimi', alias: 'kimi', model: 'kimi-k2.5-ioa' },
 ];
 
-const RECOMMENDED_MODELS = [
+const MODEL_OPTION_MAP: Record<string, ModelOption> = {
+  'claude-sonnet-4.6': { label: 'Claude Sonnet 4.6', value: 'claude-sonnet-4.6', description: '推荐 · 均衡' },
+  'claude-opus-4.6': { label: 'Claude Opus 4.6', value: 'claude-opus-4.6', description: '最强 · 慢' },
+  'claude-haiku-4.5': { label: 'Claude Haiku 4.5', value: 'claude-haiku-4.5', description: '轻量 · 快' },
+  'gemini-3.1-pro': { label: 'Gemini 3.1 Pro', value: 'gemini-3.1-pro', description: 'Google' },
+  'gemini-3.1-flash-lite': { label: 'Gemini 3.1 Flash Lite', value: 'gemini-3.1-flash-lite', description: '轻量 · 快' },
+  'gpt-5.4': { label: 'GPT-5.4', value: 'gpt-5.4', description: 'OpenAI' },
+  'gpt-5.3-codex': { label: 'GPT-5.3 Codex', value: 'gpt-5.3-codex', description: '代码专用' },
+  'glm-5.0-turbo': { label: 'GLM-5.0 Turbo', value: 'glm-5.0-turbo', description: '智谱' },
+  'minimax-m2.7': { label: 'MiniMax M2.7', value: 'minimax-m2.7', description: 'MiniMax' },
+  'kimi-k2.5-ioa': { label: 'Kimi K2.5', value: 'kimi-k2.5-ioa', description: '月之暗面' },
+};
+
+const CODEBUDDY_MODELS = [
   'claude-sonnet-4.6',
   'claude-opus-4.6',
   'gemini-3.1-pro',
   'gemini-3.1-flash-lite',
   'gpt-5.4',
   'gpt-5.3-codex',
-  'glm-5.0-ioa',
-  'minimax-m2.5-ioa',
+  'glm-5.0-turbo',
+  'minimax-m2.7',
   'kimi-k2.5-ioa',
 ] as const;
+
+const CLAUDE_MODELS = [
+  'claude-opus-4.6',
+  'claude-sonnet-4.6',
+  'claude-haiku-4.5',
+] as const;
+
+const CODEX_MODELS = ['gpt-5.4'] as const;
+
+/** Maps for runtime kind → concrete default model. Never returns empty/undefined. */
+const RUNTIME_DEFAULT_MODEL: Record<RuntimeKind, string> = {
+  claude: 'claude-sonnet-4.6',
+  codebuddy: 'gpt-5.4',
+  codex: 'gpt-5.4',
+};
+
+/**
+ * Return a concrete default model name for the given runtime.
+ * Always returns a real model identifier — never empty or 'default'.
+ */
+export function getDefaultModelForRuntime(runtime?: string | null): string {
+  return RUNTIME_DEFAULT_MODEL[resolveRuntimeKind(runtime)];
+}
+
+const RUNTIME_SHORTCUTS: Record<RuntimeKind, ShortcutCommand[]> = {
+  claude: ['/opus', '/sonnet', '/haiku'],
+  codebuddy: ['/sonnet', '/opus', '/pro', '/flash', '/gpt', '/gpt code', '/glm', '/minimax', '/kimi'],
+  codex: ['/gpt'],
+};
+
+function resolveRuntimeKind(runtime?: string | null): RuntimeKind {
+  const normalized = (runtime || '').toLowerCase();
+  if (normalized === 'codex') return 'codex';
+  if (normalized === 'codebuddy' || normalized === 'codebuddysdk') return 'codebuddy';
+  if (normalized === 'claude' || normalized === 'persistent-claude' || normalized === 'auto') return 'claude';
+  return 'codebuddy';
+}
+
+function getRuntimeModelBaseList(runtime?: string | null): string[] {
+  const runtimeKind = resolveRuntimeKind(runtime);
+  if (runtimeKind === 'claude') return [...CLAUDE_MODELS];
+  if (runtimeKind === 'codex') return [...CODEX_MODELS];
+  return [...CODEBUDDY_MODELS];
+}
+
+function getVisibleShortcuts(runtime?: string | null): ShortcutCommand[] {
+  return [...RUNTIME_SHORTCUTS[resolveRuntimeKind(runtime)]];
+}
 
 function getModelShortcutSettingKey(alias: ModelShortcutName): string {
   return `bridge_model_alias_${alias}`;
@@ -161,9 +285,7 @@ function getConfiguredShortcutModel(alias: ModelShortcutName): string | undefine
   return configured || shortcut?.model;
 }
 
-function resolveShortcutModel(
-  alias: ModelShortcutName,
-): string | undefined {
+function resolveShortcutModel(alias: ModelShortcutName): string | undefined {
   return getConfiguredShortcutModel(alias);
 }
 
@@ -171,21 +293,50 @@ function isValidModelSelection(input: string): boolean {
   return /^[A-Za-z0-9._:/-]{1,120}$/.test(input);
 }
 
-function getAvailableModelList(currentModel?: string | null, defaultModel?: string | null): string[] {
-  const candidates = new Set<string>(RECOMMENDED_MODELS);
+function normalizeRuntimeSelection(input: string): string {
+  const value = input.trim().toLowerCase();
+  if (value === 'claude') return 'persistent-claude';
+  if (value === 'codebuddy') return 'codebuddysdk';
+  return value;
+}
+
+function isValidRuntimeSelection(input: string): boolean {
+  const normalized = normalizeRuntimeSelection(input);
+  return RUNTIME_MENU_OPTIONS.some((opt) => opt.value === normalized);
+}
+
+function getAvailableModelList(
+  runtime?: string | null,
+  currentModel?: string | null,
+  defaultModel?: string | null,
+): string[] {
+  const candidates = new Set<string>(getRuntimeModelBaseList(runtime));
   if (currentModel?.trim()) candidates.add(currentModel.trim());
   if (defaultModel?.trim()) candidates.add(defaultModel.trim());
   return Array.from(candidates);
 }
 
-function buildModelCommandHelp(currentModel?: string | null, defaultModel?: string | null): string {
-  const availableModels = getAvailableModelList(currentModel, defaultModel);
-  const shortcutByModel = new Map(MODEL_SHORTCUTS.map((item) => [item.model, item.command]));
+function buildModelOptions(models: string[]): ModelOption[] {
+  return models.map((model) => MODEL_OPTION_MAP[model] || { label: model, value: model });
+}
+
+function buildModelCommandHelp(
+  runtime: string | null | undefined,
+  currentModel?: string | null,
+  defaultModel?: string | null,
+): string {
+  const availableModels = getAvailableModelList(runtime, currentModel, defaultModel);
+  const visibleShortcuts = new Set(getVisibleShortcuts(runtime));
+  const shortcutByModel = new Map(
+    MODEL_SHORTCUTS
+      .filter((item) => visibleShortcuts.has(item.command))
+      .map((item) => [resolveShortcutModel(item.alias) || item.model, item.command]),
+  );
   const lines = [
     '<b>模型切换</b>',
     '',
-    `当前模型：<code>${escapeHtml(currentModel || 'default')}</code>`,
-    `默认模型：<code>${escapeHtml(defaultModel || 'runtime default')}</code>`,
+    `当前模型：<code>${escapeHtml(currentModel || defaultModel || 'unknown')}</code>`,
+    `默认模型：<code>${escapeHtml(defaultModel || 'unknown')}</code>`,
     '',
     '直接切换：',
     '<code>/model model_name</code>',
@@ -201,33 +352,40 @@ function buildModelCommandHelp(currentModel?: string | null, defaultModel?: stri
     }
   }
 
-  lines.push(
-    '',
-    '选型建议：',
-    '- 情绪表达与陪伴 -> <code>/opus</code>、<code>/gpt</code>',
-    '  首选 Opus - 想倾诉 / 需要被理解',
-    '  次选 GPT - 想要具体建议 / 知道自己要什么',
-    '- 亲密关系与人际沟通 -> <code>/opus</code>',
-    '- 育儿知识与指引 -> <code>/pro</code>（Gemini Pro）',
-    '- 自我认知与成长探索 -> <code>/opus</code>',
-    '- 健康咨询与身体管理 -> <code>/pro</code>（Gemini Pro）',
-    '- 重大人生决策 -> <code>/opus</code>、<code>/gpt</code>',
-    '  首选 Opus - 方向迷茫 / 还没想清楚',
-    '  次选 GPT - 方向已有 / 需要梳理验证',
-    '',
-    '示例：<code>/model kimi-k2.5-ioa</code> 或 <code>/gpt</code>',
-  );
+  const visibleShortcutList = getVisibleShortcuts(runtime);
+  if (visibleShortcutList.length > 0) {
+    lines.push('', '选型建议：', '可用快捷命令：', visibleShortcutList.map((item) => `<code>${escapeHtml(item)}</code>`).join('  '));
+  }
+
+  lines.push('', `示例：<code>/model ${escapeHtml(availableModels[0] || 'gpt-5.4')}</code>`);
   return lines.join('\n');
 }
 
-function parseModelShortcutCommand(command: string, args: string): ShortcutCommand | null {
+function parseModelShortcutCommand(command: string, args: string, runtime?: string | null): ShortcutCommand | null {
+  const visible = new Set(getVisibleShortcuts(runtime));
   if (command === '/gpt' && args.toLowerCase() === 'code') {
-    return '/gpt code';
+    return visible.has('/gpt code') ? '/gpt code' : null;
   }
   const merged = args ? `${command} ${args.toLowerCase()}` : command;
-  return MODEL_SHORTCUTS.some((item) => item.command === merged as ShortcutCommand)
-    ? merged as ShortcutCommand
+  const candidate = merged as ShortcutCommand;
+  return MODEL_SHORTCUTS.some((item) => item.command === candidate) && visible.has(candidate)
+    ? candidate
     : null;
+}
+
+function buildRuntimeShortcutHelpLine(runtime?: string | null): string {
+  const visible = getVisibleShortcuts(runtime);
+  if (visible.length === 0) return '';
+  return `${visible.join(' ')} - 快捷切换模型`;
+}
+
+function buildRuntimeShortcutExampleLine(runtime?: string | null): string {
+  const visible = getVisibleShortcuts(runtime);
+  if (visible.includes('/gpt code')) {
+    return '/gpt code - 切换到 gpt-5.3-codex';
+  }
+  const first = visible[0];
+  return first ? `${first} - 快捷切换模型` : '';
 }
 
 function buildPromptGuideText(): string {
@@ -797,17 +955,22 @@ async function handleMessage(
     }
   };
 
-  // Handle callback queries (permission buttons)
+  // Handle callback queries (permission buttons + interactive commands)
   if (msg.callbackData) {
-    const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
-    if (handled) {
-      // Send confirmation
-      const confirmMsg: OutboundMessage = {
-        address: msg.address,
-        text: 'Permission response recorded.',
-        parseMode: 'plain',
-      };
-      await deliver(adapter, confirmMsg);
+    const prefix = msg.callbackData.split(':')[0];
+    if (prefix === 'perm') {
+      const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+      if (handled) {
+        // Send confirmation
+        const confirmMsg: OutboundMessage = {
+          address: msg.address,
+          text: 'Permission response recorded.',
+          parseMode: 'plain',
+        };
+        await deliver(adapter, confirmMsg);
+      }
+    } else if (prefix === 'cmd') {
+      await handleInteractiveCallback(adapter, msg);
     }
     ack();
     return;
@@ -1100,6 +1263,128 @@ async function handleMessage(
 }
 
 /**
+ * Handle interactive command callbacks from buttons/select menus.
+ * callbackData format: cmd:{action}:{value}
+ */
+async function handleInteractiveCallback(
+  adapter: BaseChannelAdapter,
+  msg: InboundMessage,
+): Promise<void> {
+  const { store } = getBridgeContext();
+  const data = msg.callbackData ?? '';
+  // cmd:{action}:{value} — action is everything before the last colon-segment
+  const segments = data.split(':');
+  if (segments[0] !== 'cmd' || segments.length < 3) return;
+
+  const action = segments[1];
+  const value = segments.slice(2).join(':'); // model names may contain colons
+
+  const channelType = adapter.channelType;
+  const isDiscord = channelType === 'discord';
+  const isFeishu = channelType === 'feishu';
+
+  const sendText = (text: string) =>
+    deliver(adapter, { address: msg.address, text, parseMode: isFeishu ? 'HTML' : 'Markdown' });
+
+  switch (action) {
+    case 'mode': {
+      if (!validateMode(value)) { await sendText('无效的模式。'); return; }
+      const binding = router.resolve(msg.address);
+      router.updateBinding(binding.id, { mode: value });
+      const label = value.charAt(0).toUpperCase() + value.slice(1);
+      if (isDiscord && msg.callbackMessageId) {
+        // Discord: edit the original interactive message
+        await adapter.answerCallback?.(msg.messageId, `已切换到 ${label} 模式`);
+      } else {
+        await sendText(`已切换到 ${label} 模式`);
+      }
+      break;
+    }
+
+    case 'model': {
+      if (!isValidModelSelection(value)) { await sendText('模型名格式无效。'); return; }
+      const binding = router.resolve(msg.address);
+      router.updateBinding(binding.id, { model: value, sdkSessionId: '' });
+      store.updateSessionModel(binding.codepilotSessionId, value);
+      if (isDiscord && msg.callbackMessageId) {
+        const st = getState();
+        const runningHint = st.activeTasks.has(binding.codepilotSessionId)
+          ? '\n当前任务不会被中断，新模型会从下一条消息开始生效。' : '';
+        await adapter.answerCallback?.(msg.messageId, `已切换到 ${value}${runningHint}`);
+      } else {
+        await sendText(`已切换到模型 ${value}`);
+      }
+      break;
+    }
+
+    case 'runtime': {
+      if (!isValidRuntimeSelection(value)) { await sendText('Runtime 值无效。'); return; }
+      const normalizedRuntime = normalizeRuntimeSelection(value);
+      const binding = router.resolve(msg.address);
+      const defaultModel = getDefaultModelForRuntime(normalizedRuntime);
+      router.updateBinding(binding.id, {
+        runtime: normalizedRuntime,
+        model: defaultModel,
+        sdkSessionId: '',
+      });
+      store.updateSessionModel(binding.codepilotSessionId, defaultModel);
+
+      if (isDiscord && msg.callbackMessageId) {
+        await adapter.answerCallback?.(
+          msg.messageId,
+          `已切换 Runtime 到 ${formatRuntimeLabel(normalizedRuntime)}，并将模型重置为 ${defaultModel}`,
+        );
+      } else {
+        await sendText(`已切换 Runtime 到 ${formatRuntimeLabel(normalizedRuntime)}，模型已重置为 ${defaultModel}`);
+      }
+      break;
+    }
+
+    case 'prompt': {
+      const { scopeKey: activeScopeKey, inheritedScopeKeys } = resolveAddressScope(msg.address);
+      if (value === 'set') {
+        await sendText([
+          '请发送以下命令设置 Prompt：',
+          '',
+          '`/prompt set 你的提示词`',
+          `当前作用域：\`${activeScopeKey}\``,
+        ].join('\n'));
+        return;
+      }
+      if (value === 'show') {
+        const effectiveScopeKey = [...inheritedScopeKeys].reverse().find((scopeKey) => {
+          const prompt = store.getScopedSystemPrompt(scopeKey)?.prompt?.trim();
+          return !!prompt;
+        });
+        const effectivePrompt = effectiveScopeKey
+          ? (store.getScopedSystemPrompt(effectiveScopeKey)?.prompt?.trim() || '')
+          : '';
+        await sendText([
+          '**Prompt 状态**',
+          `Active Scope: \`${activeScopeKey}\``,
+          `Prompt Source: \`${effectiveScopeKey || 'none'}\``,
+          `Prompt Status: ${effectivePrompt ? '已配置' : '未配置'}`,
+          effectivePrompt ? `Prompt Preview: ${effectivePrompt.slice(0, 120)}${effectivePrompt.length > 120 ? '…' : ''}` : '',
+        ].filter(Boolean).join('\n'));
+        return;
+      }
+      if (value === 'clear') {
+        const deleted = store.deleteScopedSystemPrompt(activeScopeKey);
+        await sendText(deleted
+          ? `已清空当前作用域 Prompt：\`${activeScopeKey}\``
+          : `当前作用域尚未配置 Prompt：\`${activeScopeKey}\``);
+        return;
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+
+/**
  * Handle IM slash commands.
  */
 async function handleCommand(
@@ -1114,6 +1399,7 @@ async function handleCommand(
   const command = parts[0].split('@')[0].toLowerCase();
   const args = parts.slice(1).join(' ').trim();
   const defaultModel = store.getSetting('bridge_default_model') || store.getSetting('default_model') || '';
+  const defaultRuntime = getBridgeContext().runtime || null;
 
   // Run dangerous-input detection on the full command text
   const dangerCheck = isDangerousInput(text);
@@ -1136,7 +1422,7 @@ async function handleCommand(
   }
 
   let response = '';
-
+  let interactiveMsg: OutboundMessage | null = null;
   switch (command) {
     case '/start':
       response = [
@@ -1151,8 +1437,8 @@ async function handleCommand(
         '/mode plan|code|ask - 切换模式',
         '/model - 查看当前模型与快捷切换',
         '/model &lt;name&gt; - 切换到指定模型',
-        '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
-        '/gpt code - 切换到 gpt-5.3-codex',
+        buildRuntimeShortcutHelpLine(defaultRuntime),
+        buildRuntimeShortcutExampleLine(defaultRuntime),
         '/prompt - 查看和管理作用域 Prompt',
         '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
         // '/new [path] - 新建会话',
@@ -1227,24 +1513,80 @@ async function handleCommand(
     }
 
     case '/mode': {
-      if (!validateMode(args)) {
+      if (args) {
+        if (!validateMode(args)) {
+          response = [
+            '请指定模式：plan、code、ask 或 bypass',
+            '',
+            '示例：<code>/mode code</code>',
+          ].join('\n');
+          break;
+        }
+        const binding = router.resolve(msg.address);
+        router.updateBinding(binding.id, { mode: args });
+        response = `Mode set to <b>${args}</b>`;
+        break;
+      }
+      // No args → interactive mode picker for Discord/Feishu
+      if (adapter.channelType === 'discord') {
+        const binding = router.resolve(msg.address);
+        const current = binding.mode;
+        const modeOptions = MODE_MENU_OPTIONS.map((option) => ({
+          ...option,
+          description: option.value === current ? `当前：${option.description || option.value}` : option.description,
+        }));
+        interactiveMsg = buildDiscordSelectMenuMessage(
+          msg.address,
+          msg.messageId,
+          '⚙️ 切换模式',
+          `当前模式：${current}`,
+          'select:mode',
+          '选择要切换的模式',
+          modeOptions,
+        );
+      } else if (adapter.channelType === 'feishu') {
+        const binding = router.resolve(msg.address);
+        interactiveMsg = {
+          address: msg.address,
+          text: '',
+          feishuCard: buildModeCard(binding.mode),
+          replyToMessageId: msg.messageId,
+        };
+      } else {
         response = [
-          '请指定模式：plan、code 或 ask',
+          '请指定模式：plan、code、ask 或 bypass',
           '',
           '示例：<code>/mode code</code>',
         ].join('\n');
-        break;
       }
-      const binding = router.resolve(msg.address);
-      router.updateBinding(binding.id, { mode: args });
-      response = `Mode set to <b>${args}</b>`;
       break;
     }
 
     case '/model': {
       const binding = router.resolve(msg.address);
+      const runtime = binding.runtime || defaultRuntime;
+      const modelOptions = buildModelOptions(getAvailableModelList(runtime, binding.model, defaultModel));
       if (!args) {
-        response = buildModelCommandHelp(binding.model, defaultModel);
+        if (adapter.channelType === 'discord') {
+          interactiveMsg = buildDiscordSelectMenuMessage(
+            msg.address,
+            msg.messageId,
+            '🤖 模型切换',
+            `当前模型：${binding.model || 'default'}`,
+            'select:model',
+            '选择要切换的模型',
+            modelOptions,
+          );
+        } else if (adapter.channelType === 'feishu') {
+          interactiveMsg = {
+            address: msg.address,
+            text: '',
+            feishuCard: buildModelPickerCard(binding.model, modelOptions),
+            replyToMessageId: msg.messageId,
+          };
+        } else {
+          response = buildModelCommandHelp(runtime, binding.model, defaultModel);
+        }
         break;
       }
       const targetModel = args.trim();
@@ -1329,25 +1671,28 @@ async function handleCommand(
     }
     case '/sonnet':
     case '/opus':
+    case '/haiku':
     case '/pro':
     case '/flash':
     case '/gpt':
     case '/glm':
     case '/minimax':
     case '/kimi': {
-      const shortcutCommand = parseModelShortcutCommand(command, args);
-      const shortcut = MODEL_SHORTCUTS.find((item) => item.command === shortcutCommand);
       const binding = router.resolve(msg.address);
+      const runtime = binding.runtime || defaultRuntime;
+      const shortcutCommand = parseModelShortcutCommand(command, args, runtime);
+      const shortcut = MODEL_SHORTCUTS.find((item) => item.command === shortcutCommand);
       const targetModel = shortcut
         ? resolveShortcutModel(shortcut.alias)
         : undefined;
       if (!shortcut || !targetModel) {
-        const alias = shortcut?.alias || command.replace('/', '');
+        const visibleShortcuts = getVisibleShortcuts(runtime);
         response = [
-          `${escapeHtml(command)} 尚未配置具体模型。`,
+          `${escapeHtml(command)} 在当前 runtime 下不可用，或尚未配置具体模型。`,
           '',
-          `请直接使用 <code>/model &lt;model_name&gt;</code>，或配置 <code>${escapeHtml(getModelShortcutSettingKey(alias as ModelShortcutName))}</code>。`,
-          '配置完成后可用 <code>/model</code> 查看当前快捷映射。',
+          `当前 runtime：<code>${escapeHtml(runtime || 'unknown')}</code>`,
+          `可用快捷命令：${visibleShortcuts.map((item) => `<code>${escapeHtml(item)}</code>`).join(' ') || '无'}`,
+          '你也可以直接使用 <code>/model &lt;model_name&gt;</code>。',
         ].join('\n');
         break;
       }
@@ -1363,14 +1708,143 @@ async function handleCommand(
 
     case '/status': {
       const binding = router.resolve(msg.address);
-      response = [
-        '<b>Bridge Status</b>',
-        '',
-        `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
-        `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
-        `Mode: <b>${binding.mode}</b>`,
-        `Model: <code>${binding.model || 'default'}</code>`,
-      ].join('\n');
+      const runtime = formatRuntimeLabel(binding.runtime || defaultRuntime || getBridgeContext().runtime);
+      const st = getState();
+      const running = st.activeTasks.has(binding.codepilotSessionId) ? 'running' : 'idle';
+      const runtimeKey = binding.runtime || defaultRuntime;
+      const modelOptions = buildModelOptions(getAvailableModelList(runtimeKey, binding.model, defaultModel));
+      const runtimeOptions = RUNTIME_MENU_OPTIONS.map((option) => ({
+        ...option,
+        description: option.value === runtimeKey
+          ? `当前：${option.description || option.label}`
+          : option.description,
+      }));
+
+      const { scopeKey: activeScopeKey, inheritedScopeKeys } = resolveAddressScope(msg.address);
+      const promptByScope = (scopeKey: string) => store.getScopedSystemPrompt(scopeKey)?.prompt?.trim() || '';
+      const effectiveScopeKey = [...inheritedScopeKeys].reverse().find((scopeKey) => promptByScope(scopeKey));
+      const effectivePrompt = effectiveScopeKey ? promptByScope(effectiveScopeKey) : '';
+
+      if (adapter.channelType === 'feishu') {
+        interactiveMsg = {
+          address: msg.address,
+          text: '',
+          feishuCard: buildStatusCard(
+            { ...binding, runtime, taskStatus: running },
+            modelOptions,
+            runtimeOptions,
+            {
+              activeScopeKey,
+              effectiveScopeKey: effectiveScopeKey || null,
+              hasEffectivePrompt: !!effectivePrompt,
+            },
+          ),
+          replyToMessageId: msg.messageId,
+        };
+      } else if (adapter.channelType === 'discord') {
+        const modeButtons = MODE_MENU_OPTIONS.map((option) => ({
+          text: option.label,
+          callbackData: `cmd:mode:${option.value}`,
+          style: option.value === binding.mode ? 'primary' as const : 'secondary' as const,
+        }));
+
+        const promptButtons = [
+          { text: '设置 Prompt', callbackData: 'cmd:prompt:set', style: 'primary' as const },
+          { text: '查看 Prompt', callbackData: 'cmd:prompt:show', style: 'secondary' as const },
+          { text: '清空 Prompt', callbackData: 'cmd:prompt:clear', style: 'danger' as const },
+        ];
+
+        await deliver(adapter, {
+          address: msg.address,
+          text: [
+            '**Session**',
+            `Session ID: \`${binding.codepilotSessionId}\``,
+            `CWD: \`${binding.workingDirectory || '~'}\``,
+          ].join('\n'),
+          parseMode: 'Markdown',
+          replyToMessageId: msg.messageId,
+        });
+
+        await deliver(adapter, {
+          address: msg.address,
+          text: [
+            '**Model**',
+            `Current Model: \`${binding.model || 'default'}\``,
+            '在下拉中选择模型。',
+          ].join('\n'),
+          parseMode: 'Markdown',
+          selectMenu: {
+            customId: 'select:model',
+            placeholder: '选择要切换的模型',
+            options: modelOptions,
+          },
+        });
+
+        await deliver(adapter, {
+          address: msg.address,
+          text: [
+            '**Runtime**',
+            `Current Runtime: \`${runtime}\``,
+            '在下拉中选择运行时。',
+          ].join('\n'),
+          parseMode: 'Markdown',
+          selectMenu: {
+            customId: 'select:runtime',
+            placeholder: '选择要切换的 Runtime',
+            options: runtimeOptions,
+          },
+        });
+
+        await deliver(adapter, {
+          address: msg.address,
+          text: [
+            '**Mode**',
+            `Current Mode: **${binding.mode}**`,
+            '点击按钮切换会话模式。',
+          ].join('\n'),
+          parseMode: 'Markdown',
+          inlineButtons: [modeButtons],
+        });
+
+        await deliver(adapter, {
+          address: msg.address,
+          text: [
+            '**Prompt**',
+            `Active Scope: \`${activeScopeKey}\``,
+            `Prompt Source: \`${effectiveScopeKey || 'none'}\``,
+            `Prompt Status: ${effectivePrompt ? '已配置' : '未配置'}`,
+            '使用按钮设置/查看/清空当前作用域 Prompt。',
+          ].join('\n'),
+          parseMode: 'Markdown',
+          inlineButtons: [promptButtons],
+        });
+      } else {
+        response = [
+          '<b>BuddyBridge 状态</b>',
+          '',
+          '<b>Session</b>',
+          `Session ID: <code>${binding.codepilotSessionId}</code>`,
+          `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
+          '',
+          '<b>Model</b>',
+          `Current Model: <code>${binding.model || 'default'}</code>`,
+          '执行 <code>/model</code> 可切换模型',
+          '',
+          '<b>Runtime</b>',
+          `Current Runtime: <code>${runtime}</code>`,
+          '执行 <code>/runtime</code>（后续支持）',
+          '',
+          '<b>Mode</b>',
+          `Current Mode: <b>${binding.mode}</b>`,
+          '执行 <code>/mode</code> 可切换模式',
+          '',
+          '<b>Prompt</b>',
+          `Active Scope: <code>${escapeHtml(activeScopeKey)}</code>`,
+          `Prompt Source: <code>${escapeHtml(effectiveScopeKey || 'none')}</code>`,
+          `Prompt Status: <b>${effectivePrompt ? '已配置' : '未配置'}</b>`,
+          '执行 <code>/prompt</code> 查看，<code>/prompt set ...</code> 设置',
+        ].join('\n');
+      }
       break;
     }
 
@@ -1424,26 +1898,30 @@ async function handleCommand(
     }
 
     case '/help':
-      response = [
-        '<b>BuddyBridge 命令列表</b>',
-        '',
-        '/new - 新建会话',
-        '/status - 查看当前状态',
-        '/stop - 停止当前会话',
-        '/cwd /path - 修改工作目录',
-        '/mode plan|code|ask - 切换模式',
-        '/model - 查看当前模型与快捷切换',
-        '/model &lt;name&gt; - 切换到指定模型',
-        '/sonnet /opus /pro /flash /gpt /glm /minimax /kimi - 快捷切换模型',
-        '/gpt code - 切换到 gpt-5.3-codex',
-        '/prompt - 查看和管理作用域 Prompt',
-        '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
-        // '/new [path] - 新建会话',
-        // '/bind &lt;session_id&gt; - 绑定已有会话',
-        // '/sessions - 查看最近会话',
-        // '1/2/3 - 快捷响应权限请求（飞书/QQ，且仅有一个待处理请求时）',
-        // '/help - 查看帮助',
-      ].join('\n');
+      if (adapter.channelType === 'feishu') {
+        interactiveMsg = {
+          address: msg.address,
+          text: '',
+          feishuCard: buildHelpCard(buildRuntimeShortcutHelpLine(defaultRuntime), buildRuntimeShortcutExampleLine(defaultRuntime)),
+          replyToMessageId: msg.messageId,
+        };
+      } else {
+        response = [
+          '<b>BuddyBridge 命令列表</b>',
+          '',
+          '/new - 新建会话',
+          '/status - 查看当前状态',
+          '/stop - 停止当前会话',
+          '/cwd /path - 修改工作目录',
+          '/mode plan|code|ask - 切换模式',
+          '/model - 查看当前模型与快捷切换',
+          '/model &lt;name&gt; - 切换到指定模型',
+          buildRuntimeShortcutHelpLine(defaultRuntime),
+          buildRuntimeShortcutExampleLine(defaultRuntime),
+          '/prompt - 查看和管理作用域 Prompt',
+          '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
+        ].join('\n');
+      }
       break;
 
     default:
@@ -1457,6 +1935,10 @@ async function handleCommand(
       parseMode: 'HTML',
       replyToMessageId: msg.messageId,
     });
+  }
+
+  if (interactiveMsg) {
+    await deliver(adapter, interactiveMsg);
   }
 }
 

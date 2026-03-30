@@ -16,6 +16,7 @@ import type {
   MessageContentBlock,
 } from './host.js';
 import { getBridgeContext } from './context.js';
+import { getDefaultModelForRuntime } from './bridge-manager.js';
 import crypto from 'crypto';
 import { formatScopeRuleTitle, resolveScope } from './scope-utils.js';
 
@@ -211,13 +212,14 @@ export async function processMessage(
     }
 
     // Effective model
-    const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
+    const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || getDefaultModelForRuntime(getBridgeContext().runtime);
 
     // Permission mode from binding mode
     let permissionMode: string;
     switch (binding.mode) {
       case 'plan': permissionMode = 'plan'; break;
       case 'ask': permissionMode = 'default'; break;
+      case 'bypass': permissionMode = 'bypassPermissions'; break;
       default: permissionMode = 'acceptEdits'; break;
     }
 

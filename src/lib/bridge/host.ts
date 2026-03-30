@@ -140,6 +140,7 @@ export interface UpsertChannelBindingInput {
   mode?: string;
   scopeKey?: string;
   scopeChain?: ScopeRef[];
+  runtime?: string;
 }
 
 export interface ScopedSystemPrompt {

@@ -8,6 +8,7 @@
 import type { ChannelAddress, ChannelBinding, ChannelType, ScopeRef } from './types.js';
 import { getBridgeContext } from './context.js';
 import { resolveScope } from './scope-utils.js';
+import { getDefaultModelForRuntime } from './bridge-manager.js';
 
 function isSameScopeChain(left: ScopeRef[] | undefined, right: ScopeRef[] | undefined): boolean {
   const a = left || [];
@@ -65,6 +66,7 @@ export function resolve(address: ChannelAddress): ChannelBinding {
       workingDirectory: existing.workingDirectory,
       model: existing.model,
       mode: existing.mode,
+      runtime: existing.runtime,
     });
   }
   return createBinding(address);
@@ -82,7 +84,8 @@ export function createBinding(
     || store.getSetting('bridge_default_work_dir')
     || process.env.HOME
     || '';
-  const defaultModel = store.getSetting('bridge_default_model') || '';
+  const defaultModel = store.getSetting('bridge_default_model')
+    || getDefaultModelForRuntime(getBridgeContext().runtime);
   const defaultProviderId = store.getSetting('bridge_default_provider_id') || '';
 
   const displayName = address.displayName || address.chatId;
@@ -119,6 +122,7 @@ export function createBinding(
     workingDirectory: defaultCwd,
     model: defaultModel,
     mode: 'code',
+    runtime: getBridgeContext().runtime,
   });
 }
 
@@ -152,6 +156,7 @@ export function bindToSession(
     codepilotSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
+    runtime: getBridgeContext().runtime,
   });
 }
 
@@ -160,7 +165,7 @@ export function bindToSession(
  */
 export function updateBinding(
   id: string,
-  updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'workingDirectory' | 'model' | 'mode' | 'active'>>,
+  updates: Partial<Pick<ChannelBinding, 'sdkSessionId' | 'workingDirectory' | 'model' | 'mode' | 'runtime' | 'active'>>,
 ): void {
   getBridgeContext().store.updateChannelBinding(id, updates);
 }

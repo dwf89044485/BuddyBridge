@@ -157,6 +157,27 @@ export async function deliver(
   }
 
   const limit = limits[adapter.channelType] || 4096;
+
+  // For interactive messages (embed / feishuCard / selectMenu), send directly without chunking
+  if (message.embed || message.feishuCard || message.selectMenu) {
+    const result = await sendWithRetry(adapter, message);
+    if (result.messageId && opts?.sessionId) {
+      try {
+        store.insertOutboundRef({
+          channelType: adapter.channelType,
+          chatId: message.address.chatId,
+          codepilotSessionId: opts.sessionId,
+          platformMessageId: result.messageId,
+          purpose: 'response',
+        });
+      } catch { /* best effort */ }
+    }
+    if (opts?.dedupKey) {
+      try { store.insertDedup(opts.dedupKey); } catch { /* best effort */ }
+    }
+    return result;
+  }
+
   let chunks = chunkText(message.text, limit);
 
   // QQ: limit to max 3 segments to avoid flooding

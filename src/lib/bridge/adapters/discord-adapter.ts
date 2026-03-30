@@ -35,8 +35,24 @@ const DEFAULT_MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024;
 /** Typing indicator interval (8s, Discord typing lasts ~10s). */
 const TYPING_INTERVAL_MS = 8000;
 
+/** Presence refresh interval (5 min) to keep bot status alive across reconnects. */
+const PRESENCE_REFRESH_MS = 5 * 60 * 1000;
+
 /** Interaction TTL for answerCallback (60s). */
 const INTERACTION_TTL_MS = 60_000;
+
+/** Map our style names to discord.js ButtonStyle constants. Falls back to Primary. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapButtonStyle(style?: string): any {
+  if (!discordJs) return 1; // fallback
+  const { ButtonStyle } = discordJs;
+  switch (style) {
+    case 'success': return ButtonStyle.Success;
+    case 'danger': return ButtonStyle.Danger;
+    case 'secondary': return ButtonStyle.Secondary;
+    default: return ButtonStyle.Primary;
+  }
+}
 
 /**
  * Lazily loaded discord.js module reference.
@@ -70,6 +86,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
   private previewMessages = new Map<string, string>();
   /** Chats where preview has permanently failed. */
   private previewDegraded = new Set<string>();
+  /** Interval for periodic presence refresh. */
+  private presenceRefreshInterval: ReturnType<typeof setInterval> | null = null;
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -88,6 +106,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const djs = await loadDiscordJs();
     const { Client, GatewayIntentBits, Partials } = djs;
 
+    const { ActivityType } = djs;
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -96,6 +115,11 @@ export class DiscordAdapter extends BaseChannelAdapter {
         GatewayIntentBits.DirectMessages,
       ],
       partials: [Partials.Channel],
+      // Set initial presence in IDENTIFY payload so Gateway knows we are online from the start
+      presence: {
+        activities: [{ name: 'BuddyBridge', type: ActivityType.Playing }],
+        status: 'online',
+      },
     });
 
     // Register event handlers before login
@@ -126,6 +150,17 @@ export class DiscordAdapter extends BaseChannelAdapter {
     });
 
     this.botUserId = this.client.user?.id || null;
+
+    // Refresh bot presence and start periodic refresh to survive reconnects
+    this.refreshPresence();
+    this.presenceRefreshInterval = setInterval(() => this.refreshPresence(), PRESENCE_REFRESH_MS);
+
+    try {
+      await this.registerSlashCommands();
+    } catch (err) {
+      console.warn('[discord-adapter] Slash command registration failed:', err instanceof Error ? err.message : err);
+    }
+
     this.running = true;
 
     console.log('[discord-adapter] Started (botUserId:', this.botUserId || 'unknown', ')');
@@ -134,6 +169,12 @@ export class DiscordAdapter extends BaseChannelAdapter {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+
+    // Stop presence refresh
+    if (this.presenceRefreshInterval) {
+      clearInterval(this.presenceRefreshInterval);
+      this.presenceRefreshInterval = null;
+    }
 
     // Destroy client
     if (this.client) {
@@ -168,6 +209,18 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** Push presence update via Gateway to keep bot shown as online. */
+  private refreshPresence(): void {
+    try {
+      this.client?.user?.setPresence?.({
+        activities: [{ name: 'BuddyBridge', type: 0 }],
+        status: 'online',
+      });
+    } catch (err) {
+      console.warn('[discord-adapter] Failed to refresh presence:', err instanceof Error ? err.message : err);
+    }
   }
 
   // ── Queue ───────────────────────────────────────────────────
@@ -261,32 +314,122 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
       // Build message options
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const options: { content: string; components?: any[] } = {
-        content: text.slice(0, DISCORD_CHAR_LIMIT),
-      };
+      const options: { content?: string; embeds?: any[]; components?: any[]; flags?: number } = {};
+      let autoWrappedInteractiveEmbed = false;
+      let usedComponentsV2 = false;
 
-      // Build inline buttons as Discord components
+      // Discord Embed
+      if (message.embed) {
+        options.embeds = [message.embed];
+      }
+
+      // Content (skip if embed-only)
+      if (text) {
+        options.content = text.slice(0, DISCORD_CHAR_LIMIT);
+      }
+
+      // Build components (buttons + select menus)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const components: any[] = [];
+
       if (message.inlineButtons && message.inlineButtons.length > 0 && discordJs) {
         const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = discordJs;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rows: any[] = [];
         for (const row of message.inlineButtons) {
           const actionRow = new ActionRowBuilder();
           for (const btn of row) {
+            const style = mapButtonStyle(btn.style);
             actionRow.addComponents(
               new ButtonBuilder()
                 .setCustomId(btn.callbackData)
                 .setLabel(btn.text)
-                .setStyle(ButtonStyle.Primary),
+                .setStyle(style),
             );
           }
-          rows.push(actionRow);
+          components.push(actionRow);
         }
-        options.components = rows;
       }
 
-      const sent = await channel.send(options);
-      return { ok: true, messageId: sent.id };
+      if (message.selectMenu && discordJs) {
+        const { ActionRowBuilder, StringSelectMenuBuilder } = discordJs;
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId(message.selectMenu.customId)
+          .setPlaceholder(message.selectMenu.placeholder ?? 'Select an option');
+        for (const opt of message.selectMenu.options) {
+          const entry: { label: string; value: string; description?: string } = { label: opt.label, value: opt.value };
+          if (opt.description) entry.description = opt.description;
+          menu.addOptions(entry);
+        }
+        components.push(new ActionRowBuilder().addComponents(menu));
+      }
+
+      if (components.length > 0) {
+        options.components = components;
+
+        // Prefer Components V2 container layout for a more card-like unified block.
+        if (!options.embeds && options.content && discordJs?.MessageFlags?.IsComponentsV2) {
+          const classicRows = components
+            .map((row: any) => (typeof row?.toJSON === 'function' ? row.toJSON() : row))
+            .filter(Boolean);
+          options.flags = discordJs.MessageFlags.IsComponentsV2;
+          options.components = [
+            {
+              type: 17, // CONTAINER
+              components: [
+                { type: 10, content: options.content }, // TEXT_DISPLAY
+                ...classicRows,
+              ],
+            },
+          ];
+          delete options.content;
+          usedComponentsV2 = true;
+        }
+
+        // Fallback layout (legacy): wrap interactive text into an embed.
+        // Only auto-wrap when caller didn't provide a custom embed.
+        if (!usedComponentsV2 && !options.embeds && options.content && discordJs?.EmbedBuilder) {
+          const { EmbedBuilder } = discordJs;
+          options.embeds = [new EmbedBuilder().setDescription(options.content)];
+          delete options.content;
+          autoWrappedInteractiveEmbed = true;
+        }
+      }
+
+      try {
+        const sent = await channel.send(options);
+        return { ok: true, messageId: sent.id };
+      } catch (err) {
+        // Fallback #1: Components V2 failed, retry with classic content + components.
+        if (usedComponentsV2 && text) {
+          try {
+            const classicRows = components
+              .map((row: any) => (typeof row?.toJSON === 'function' ? row.toJSON() : row))
+              .filter(Boolean);
+            const fallbackOptions: { content?: string; components?: any[] } = {
+              content: text.slice(0, DISCORD_CHAR_LIMIT),
+              components: classicRows,
+            };
+            const sentFallback = await channel.send(fallbackOptions);
+            return { ok: true, messageId: sentFallback.id };
+          } catch (fallbackErr) {
+            return { ok: false, error: fallbackErr instanceof Error ? fallbackErr.message : 'Send failed' };
+          }
+        }
+
+        // Fallback #2: auto-wrapped embed failed, retry with plain content + components.
+        if (autoWrappedInteractiveEmbed && text) {
+          try {
+            const fallbackOptions: { content?: string; components?: any[] } = {
+              content: text.slice(0, DISCORD_CHAR_LIMIT),
+              components: options.components,
+            };
+            const sentFallback = await channel.send(fallbackOptions);
+            return { ok: true, messageId: sentFallback.id };
+          } catch (fallbackErr) {
+            return { ok: false, error: fallbackErr instanceof Error ? fallbackErr.message : 'Send failed' };
+          }
+        }
+        return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
+      }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
     }
@@ -298,13 +441,40 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     this.pendingInteractions.delete(callbackQueryId);
 
+    const interaction = entry.interaction;
+    const feedback = text || 'OK';
+    let cleared = false;
+
+    // Components V2 message cannot include content while editing components.
     try {
-      const interaction = entry.interaction;
-      if (interaction.isButton() && !interaction.replied) {
-        await interaction.editReply({ content: text || 'OK' });
+      if (interaction.message?.editable) {
+        await interaction.message.edit({ components: [] });
+        cleared = true;
       }
-    } catch {
-      // Interaction may have expired — non-critical
+    } catch (err) {
+      console.warn('[discord-adapter] message.edit failed, falling back to editReply:', err instanceof Error ? err.message : err);
+    }
+
+    try {
+      if (!cleared && (interaction.deferred || interaction.replied)) {
+        await interaction.editReply({ components: [] });
+        cleared = true;
+      }
+    } catch (err) {
+      console.warn('[discord-adapter] editReply fallback failed:', err instanceof Error ? err.message : err);
+    }
+
+    // Send explicit success feedback as a separate message.
+    try {
+      if (feedback.trim()) {
+        if (typeof interaction.followUp === 'function') {
+          await interaction.followUp({ content: feedback });
+        } else if (interaction.channel?.send) {
+          await interaction.channel.send({ content: feedback });
+        }
+      }
+    } catch (err) {
+      console.warn('[discord-adapter] followUp feedback failed:', err instanceof Error ? err.message : err);
     }
   }
 
@@ -382,8 +552,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const allowedUsers = getBridgeContext().store.getSetting('bridge_discord_allowed_users') || '';
     const allowedChannels = getBridgeContext().store.getSetting('bridge_discord_allowed_channels') || '';
 
-    // If both are empty, deny all (security-first, default-deny)
-    if (!allowedUsers && !allowedChannels) return false;
+    // If both are empty, allow all (matches Telegram/Feishu usability defaults).
+    // Operators can still restrict access via allowed users/channels settings.
+    if (!allowedUsers && !allowedChannels) return true;
 
     const users = allowedUsers.split(',').map(s => s.trim()).filter(Boolean);
     const channels = allowedChannels.split(',').map(s => s.trim()).filter(Boolean);
@@ -586,9 +757,130 @@ export class DiscordAdapter extends BaseChannelAdapter {
     this.enqueue(inbound);
   }
 
+  private async registerSlashCommands(): Promise<void> {
+    if (!this.client || !discordJs?.SlashCommandBuilder) return;
+
+    const { SlashCommandBuilder } = discordJs;
+    const commands = [
+      new SlashCommandBuilder()
+        .setName('mode')
+        .setDescription('查看或切换模式')
+        .addStringOption((option: any) => option
+          .setName('mode')
+          .setDescription('plan | code | ask')
+          .setRequired(false)
+          .addChoices(
+            { name: 'plan', value: 'plan' },
+            { name: 'code', value: 'code' },
+            { name: 'ask', value: 'ask' },
+          ))
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('model')
+        .setDescription('查看或切换模型')
+        .addStringOption((option: any) => option
+          .setName('model')
+          .setDescription('Model id (provider/model or id)')
+          .setRequired(false))
+        .toJSON(),
+      new SlashCommandBuilder()
+        .setName('status')
+        .setDescription('查看当前状态')
+        .toJSON(),
+    ];
+
+    const appCommands = this.client.application?.commands;
+    if (!appCommands) return;
+
+    const existing = await appCommands.fetch();
+    for (const commandData of commands) {
+      const matched = existing.find((cmd: any) => cmd.name === commandData.name);
+      if (matched) {
+        await matched.edit(commandData);
+      } else {
+        await appCommands.create(commandData);
+      }
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async handleChatInputInteraction(interaction: any): Promise<void> {
+    const commandName = (interaction.commandName || '').toLowerCase();
+    if (!['mode', 'model', 'status'].includes(commandName)) return;
+
+    const chatId = interaction.channelId;
+    const userId = interaction.user.id;
+    const displayName = interaction.user.username;
+
+    if (!this.isAuthorized(userId, chatId)) {
+      try {
+        if (discordJs?.MessageFlags?.Ephemeral !== undefined) {
+          await interaction.reply({ content: 'Unauthorized', flags: discordJs.MessageFlags.Ephemeral });
+        } else {
+          await interaction.reply({ content: 'Unauthorized', ephemeral: true });
+        }
+      } catch { /* best effort */ }
+      return;
+    }
+
+    let text = `/${commandName}`;
+    if (commandName === 'mode') {
+      const modeArg = interaction.options?.getString?.('mode');
+      if (modeArg) text = `${text} ${modeArg}`;
+    } else if (commandName === 'model') {
+      const modelArg = interaction.options?.getString?.('model');
+      if (modelArg) text = `${text} ${modelArg}`;
+    }
+
+    try {
+      if (discordJs?.MessageFlags?.Ephemeral !== undefined) {
+        await interaction.reply({ content: `已提交命令：${text}`, flags: discordJs.MessageFlags.Ephemeral });
+      } else {
+        await interaction.reply({ content: `已提交命令：${text}`, ephemeral: true });
+      }
+    } catch {
+      return;
+    }
+
+    const isGuild = Boolean(interaction.guild);
+    const isThread = Boolean(interaction.channel?.isThread?.());
+    const parentChannelId = (interaction.channel?.parentId || interaction.channel?.parent?.id) as string | undefined;
+    const scopeChain = isGuild
+      ? [
+        { kind: 'guild', id: interaction.guild.id as string },
+        ...(isThread && parentChannelId ? [{ kind: 'channel', id: parentChannelId as string }] : []),
+        { kind: isThread ? 'thread' : 'channel', id: chatId as string },
+      ]
+      : [{ kind: 'chat', id: chatId as string }];
+
+    const inbound: InboundMessage = {
+      messageId: `discord-cmd-${interaction.id}`,
+      address: {
+        channelType: 'discord',
+        chatId,
+        userId,
+        displayName,
+        channelName: (interaction.channel as { name?: string } | null | undefined)?.name ?? null,
+        parentName: (interaction.channel?.parent as { name?: string } | null | undefined)?.name ?? null,
+        guildName: interaction.guild?.name ?? null,
+        isThread,
+        scopeChain,
+      },
+      text,
+      timestamp: Date.now(),
+    };
+
+    this.enqueue(inbound);
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async handleInteraction(interaction: any): Promise<void> {
-    if (!interaction.isButton()) return;
+    if (interaction.isChatInputCommand?.()) {
+      await this.handleChatInputInteraction(interaction);
+      return;
+    }
+
+    if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
 
     try {
       // Defer immediately to avoid 3s timeout
@@ -598,7 +890,19 @@ export class DiscordAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const callbackData = interaction.customId;
+    // Derive callbackData
+    let callbackData: string;
+    if (interaction.isStringSelectMenu()) {
+      // Select Menu: combine customId + first selected value into cmd:action:value format
+      const customId = interaction.customId; // e.g. "select:model"
+      const selectedValue = interaction.values?.[0];
+      if (!selectedValue) return;
+      // Map "select:model" → "cmd:model"
+      const action = customId.replace(/^select:/, '');
+      callbackData = `cmd:${action}:${selectedValue}`;
+    } else {
+      callbackData = interaction.customId;
+    }
     const chatId = interaction.channelId;
     const userId = interaction.user.id;
     const displayName = interaction.user.username;
