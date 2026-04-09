@@ -163,7 +163,8 @@ class EchoLLM implements LLMProvider {
         // Emit result event
         controller.enqueue(`data: ${JSON.stringify({
           type: 'result',
-          data: JSON.stringify({ usage: { input_tokens: 10, output_tokens: 5 } }),
+          usage: { input_tokens: 10, output_tokens: 5 },
+          is_error: false,
         })}\n`);
         controller.close();
       },

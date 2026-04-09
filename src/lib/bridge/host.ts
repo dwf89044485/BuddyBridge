@@ -20,10 +20,15 @@ export interface FileAttachment {
   filePath?: string;
 }
 
-/** Server-Sent Event from the LLM stream. */
+/** Server-Sent Event from the LLM stream.
+ *
+ * Simple events (text, error, keep_alive) carry a `data` string field.
+ * Structured events (tool_use, result, status, …) spread their fields
+ * directly at the top level — no double-JSON encoding.
+ */
 export interface SSEEvent {
   type: SSEEventType;
-  data: string;
+  [key: string]: unknown;
 }
 
 export type SSEEventType =

@@ -202,7 +202,7 @@ describe('conversation-engine scoped prompts', () => {
         return new ReadableStream<string>({
           start(controller) {
             controller.enqueue('data: {"type":"text","data":"ok"}\n');
-            controller.enqueue('data: {"type":"result","data":"{\\"usage\\":{\\"input_tokens\\":1,\\"output_tokens\\":1},\\"is_error\\":false}"}\n');
+            controller.enqueue('data: {"type":"result","usage":{"input_tokens":1,"output_tokens":1},"is_error":false}\n');
             controller.close();
           },
         });
@@ -268,7 +268,7 @@ describe('conversation-engine scoped prompts', () => {
         return new ReadableStream<string>({
           start(controller) {
             controller.enqueue('data: {"type":"text","data":"ok"}\n');
-            controller.enqueue('data: {"type":"result","data":"{\\"usage\\":{\\"input_tokens\\":1,\\"output_tokens\\":1},\\"is_error\\":false}"}\n');
+            controller.enqueue('data: {"type":"result","usage":{"input_tokens":1,"output_tokens":1},"is_error":false}\n');
             controller.close();
           },
         });

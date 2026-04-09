@@ -358,15 +358,14 @@ async function consumeStream(
               currentText = '';
             }
             try {
-              const toolData = JSON.parse(event.data);
               contentBlocks.push({
                 type: 'tool_use',
-                id: toolData.id,
-                name: toolData.name,
-                input: toolData.input,
+                id: event.id as string,
+                name: event.name as string,
+                input: event.input,
               });
               if (onToolEvent) {
-                try { onToolEvent(toolData.id, toolData.name, 'running'); } catch { /* non-critical */ }
+                try { onToolEvent(event.id as string, event.name as string, 'running'); } catch { /* non-critical */ }
               }
             } catch { /* skip */ }
             break;
@@ -374,28 +373,27 @@ async function consumeStream(
 
           case 'tool_result': {
             try {
-              const resultData = JSON.parse(event.data);
               const newBlock = {
                 type: 'tool_result' as const,
-                tool_use_id: resultData.tool_use_id,
-                content: resultData.content,
-                is_error: resultData.is_error || false,
+                tool_use_id: event.tool_use_id as string,
+                content: event.content as string,
+                is_error: (event.is_error as boolean) || false,
               };
-              if (seenToolResultIds.has(resultData.tool_use_id)) {
+              if (seenToolResultIds.has(newBlock.tool_use_id)) {
                 const idx = contentBlocks.findIndex(
-                  (b) => b.type === 'tool_result' && 'tool_use_id' in b && b.tool_use_id === resultData.tool_use_id
+                  (b) => b.type === 'tool_result' && 'tool_use_id' in b && b.tool_use_id === newBlock.tool_use_id
                 );
                 if (idx >= 0) contentBlocks[idx] = newBlock;
               } else {
-                seenToolResultIds.add(resultData.tool_use_id);
+                seenToolResultIds.add(newBlock.tool_use_id);
                 contentBlocks.push(newBlock);
               }
               if (onToolEvent) {
                 try {
                   onToolEvent(
-                    resultData.tool_use_id,
+                    newBlock.tool_use_id,
                     '', // name not available in tool_result, adapter tracks by id
-                    resultData.is_error ? 'error' : 'complete',
+                    newBlock.is_error ? 'error' : 'complete',
                   );
                 } catch { /* non-critical */ }
               }
@@ -405,12 +403,11 @@ async function consumeStream(
 
           case 'permission_request': {
             try {
-              const permData = JSON.parse(event.data);
               const perm: PermissionRequestInfo = {
-                permissionRequestId: permData.permissionRequestId,
-                toolName: permData.toolName,
-                toolInput: permData.toolInput,
-                suggestions: permData.suggestions,
+                permissionRequestId: event.permissionRequestId as string,
+                toolName: event.toolName as string,
+                toolInput: event.toolInput as Record<string, unknown>,
+                suggestions: event.suggestions as unknown[],
               };
               permissionRequests.push(perm);
               // Forward immediately — the stream blocks until the permission is
@@ -426,13 +423,12 @@ async function consumeStream(
 
           case 'status': {
             try {
-              const statusData = JSON.parse(event.data);
-              if (statusData.session_id) {
-                capturedSdkSessionId = statusData.session_id;
-                store.updateSdkSessionId(sessionId, statusData.session_id);
+              if (event.session_id) {
+                capturedSdkSessionId = event.session_id as string;
+                store.updateSdkSessionId(sessionId, event.session_id as string);
               }
-              if (statusData.model) {
-                store.updateSessionModel(sessionId, statusData.model);
+              if (event.model) {
+                store.updateSessionModel(sessionId, event.model as string);
               }
             } catch { /* skip */ }
             break;
@@ -440,9 +436,8 @@ async function consumeStream(
 
           case 'task_update': {
             try {
-              const taskData = JSON.parse(event.data);
-              if (taskData.session_id && taskData.todos) {
-                store.syncSdkTasks(taskData.session_id, taskData.todos);
+              if (event.session_id && event.todos) {
+                store.syncSdkTasks(event.session_id as string, event.todos as unknown[]);
               }
             } catch { /* skip */ }
             break;
@@ -450,17 +445,16 @@ async function consumeStream(
 
           case 'error':
             hasError = true;
-            errorMessage = event.data || 'Unknown error';
+            errorMessage = (event.data as string) || 'Unknown error';
             break;
 
           case 'result': {
             try {
-              const resultData = JSON.parse(event.data);
-              if (resultData.usage) tokenUsage = resultData.usage;
-              if (resultData.is_error) hasError = true;
-              if (resultData.session_id) {
-                capturedSdkSessionId = resultData.session_id;
-                store.updateSdkSessionId(sessionId, resultData.session_id);
+              if (event.usage) tokenUsage = event.usage as TokenUsage;
+              if (event.is_error) hasError = true;
+              if (event.session_id) {
+                capturedSdkSessionId = event.session_id as string;
+                store.updateSdkSessionId(sessionId, event.session_id as string);
               }
             } catch { /* skip */ }
             break;
