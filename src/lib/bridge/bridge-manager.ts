@@ -105,7 +105,7 @@ function formatRuntimeLabel(runtime?: string): string {
  * session lock would deadlock.
  */
 function isNumericPermissionShortcut(channelType: string, rawText: string, chatId: string): boolean {
-  if (channelType !== 'feishu' && channelType !== 'qq') return false;
+  if (channelType !== 'feishu' && channelType !== 'qq' && channelType !== 'weixin') return false;
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!/^[123]$/.test(normalized)) return false;
   const { store } = getBridgeContext();
@@ -979,13 +979,27 @@ async function handleMessage(
   const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
 
-  // Handle image-only download failures — surface error to user instead of silently dropping
+  // Handle attachment-only download failures — surface error to user instead of silently dropping
   if (!rawText && !hasAttachments) {
-    const rawData = msg.raw as { imageDownloadFailed?: boolean; failedCount?: number } | undefined;
-    if (rawData?.imageDownloadFailed) {
+    const rawData = msg.raw as {
+      imageDownloadFailed?: boolean;
+      attachmentDownloadFailed?: boolean;
+      failedCount?: number;
+      failedLabel?: string;
+      userVisibleError?: string;
+    } | undefined;
+    if (rawData?.userVisibleError) {
       await deliver(adapter, {
         address: msg.address,
-        text: `Failed to download ${rawData.failedCount ?? 1} image(s). Please try sending again.`,
+        text: rawData.userVisibleError,
+        parseMode: 'plain',
+        replyToMessageId: msg.messageId,
+      });
+    } else if (rawData?.imageDownloadFailed || rawData?.attachmentDownloadFailed) {
+      const failureLabel = rawData.failedLabel || (rawData.imageDownloadFailed ? 'image(s)' : 'attachment(s)');
+      await deliver(adapter, {
+        address: msg.address,
+        text: `Failed to download ${rawData.failedCount ?? 1} ${failureLabel}. Please try sending again.`,
         parseMode: 'plain',
         replyToMessageId: msg.messageId,
       });
@@ -994,7 +1008,7 @@ async function handleMessage(
     return;
   }
 
-  // ── Numeric shortcut for permission replies (feishu/qq only) ──
+  // ── Numeric shortcut for permission replies (feishu/qq/weixin only) ──
   // On mobile, typing `/perm allow <uuid>` is painful.
   // If the user sends "1", "2", or "3" and there is exactly one pending
   // permission for this chat, map it: 1→allow, 2→allow_session, 3→deny.
@@ -1002,7 +1016,11 @@ async function handleMessage(
   // Input normalization: mobile keyboards / IM clients may send fullwidth
   // digits (１２３), digits with zero-width joiners, or other Unicode
   // variants. NFKC normalization folds them all to ASCII 1/2/3.
-  if (adapter.channelType === 'feishu' || adapter.channelType === 'qq') {
+  if (
+    adapter.channelType === 'feishu'
+    || adapter.channelType === 'qq'
+    || adapter.channelType === 'weixin'
+  ) {
     // eslint-disable-next-line no-control-regex
     const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     if (/^[123]$/.test(normalized)) {
@@ -1920,6 +1938,8 @@ async function handleCommand(
           buildRuntimeShortcutExampleLine(defaultRuntime),
           '/prompt - 查看和管理作用域 Prompt',
           '/perm allow|allow_session|deny &lt;id&gt; - 响应权限请求',
+          '1/2/3 - 快捷权限回复（飞书/QQ/微信，仅单个待处理时）',
+          '/help - 显示此帮助',
         ].join('\n');
       }
       break;
