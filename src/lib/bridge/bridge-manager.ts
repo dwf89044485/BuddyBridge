@@ -1471,11 +1471,12 @@ async function handleCommand(
     case '/new': {
       // Abort any running task on the current session before creating a new one
       const oldBinding = router.resolve(msg.address);
+      const oldSessionId = oldBinding.codepilotSessionId;
       const st = getState();
-      const oldTask = st.activeTasks.get(oldBinding.codepilotSessionId);
+      const oldTask = st.activeTasks.get(oldSessionId);
       if (oldTask) {
         oldTask.abort();
-        st.activeTasks.delete(oldBinding.codepilotSessionId);
+        st.activeTasks.delete(oldSessionId);
       }
 
       let workDir: string | undefined;
@@ -1488,10 +1489,18 @@ async function handleCommand(
         workDir = validated;
       }
       const binding = router.createBinding(msg.address, workDir);
+
+      // Clear messages from old session to ensure context is reset
+      try {
+        const { store } = getBridgeContext();
+        store.clearSessionMessages(oldSessionId);
+      } catch (e) {
+        console.warn(`[bridge-manager] Failed to clear messages from old session ${oldSessionId}:`, e instanceof Error ? e.message : e);
+      }
+
       response = `New session created.\nSession: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>\nCWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`;
       break;
     }
-
     case '/bind': {
       if (!args) {
         response = 'Usage: /bind &lt;session_id&gt;';

@@ -195,6 +195,10 @@ export interface BridgeStore {
     mode?: string,
   ): BridgeSession;
   updateSessionProviderId(sessionId: string, providerId: string): void;
+  /** Clear all messages from a session without deleting the session itself. */
+  clearSessionMessages(sessionId: string): void;
+  /** Delete a session entirely, including all its messages. Returns true if session existed and was deleted. */
+  deleteSession(sessionId: string): boolean;
 
   // ── Messages ──
   addMessage(sessionId: string, role: string, content: string, usage?: string | null): void;

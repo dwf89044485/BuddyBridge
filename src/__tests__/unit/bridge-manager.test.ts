@@ -580,7 +580,7 @@ describe('bridge-manager model switch commands', () => {
     assert.equal(binding?.model, 'gpt-5');
     assert.equal(binding?.sdkSessionId, '');
     assert.equal(store.sessionModelUpdates.at(-1)?.model, 'gpt-5');
-    assert.equal(store.getSession('session-chat-model-set')?.model, 'gpt-5');
+    assert.equal(store.getSession(binding?.codepilotSessionId!)?.model, 'gpt-5');
     assert.match(sentMessages[0].text || '', /已切换到模型 <code>gpt-5<\/code>/);
   });
 
@@ -609,7 +609,7 @@ describe('bridge-manager model switch commands', () => {
 
     const binding = store.getChannelBinding('qq', 'chat-gpt-shortcut');
     assert.equal(binding?.model, 'gpt-5.4');
-    assert.equal(store.getSession('session-chat-gpt-shortcut')?.model, 'gpt-5.4');
+    assert.equal(store.getSession(binding?.codepilotSessionId!)?.model, 'gpt-5.4');
     assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt<\/code> 切换到 <code>gpt-5\.4<\/code>/);
   });
 
@@ -638,7 +638,7 @@ describe('bridge-manager model switch commands', () => {
 
     const binding = store.getChannelBinding('qq', 'chat-gpt-code-shortcut');
     assert.equal(binding?.model, 'gpt-5.3-codex');
-    assert.equal(store.getSession('session-chat-gpt-code-shortcut')?.model, 'gpt-5.3-codex');
+    assert.equal(store.getSession(binding?.codepilotSessionId!)?.model, 'gpt-5.3-codex');
     assert.match(sentMessages[0].text || '', /已通过 <code>\/gpt code<\/code> 切换到 <code>gpt-5\.3-codex<\/code>/);
   });
 });
@@ -680,6 +680,7 @@ type ModelSwitchStore = BridgeStore & {
 };
 
 function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwitchStore {
+  let sessionCounter = 0;
   const bindings = new Map<string, ChannelBinding>();
   const sessions = new Map<string, { id: string; working_directory: string; model: string; system_prompt?: string; provider_id?: string }>();
   const sessionModelUpdates: Array<{ sessionId: string; model: string }> = [];
@@ -774,8 +775,7 @@ function createModelSwitchStore(settings: Record<string, string> = {}): ModelSwi
     },
     getSession: (id: string) => sessions.get(id) || null,
     createSession: (_name: string, model: string, _systemPrompt?: string, cwd?: string) => {
-      const sessionLabel = _name.replace(/^Bridge:\s*/, '').trim() || String(bindings.size + 1);
-      const sessionId = `session-${sessionLabel}`;
+      const sessionId = `session-${++sessionCounter}`;
       const session = {
         id: sessionId,
         working_directory: cwd || '',
@@ -850,5 +850,89 @@ function createMinimalStore(settings: Record<string, string> = {}): BridgeStore 
     listPendingPermissionLinksByChat: () => [],
     getChannelOffset: () => '0',
     setChannelOffset: () => {},
+    clearSessionMessages: () => {},
+    deleteSession: () => true,
   };
 }
+
+describe('bridge-manager /new command', () => {
+  it('creates new session and clears old session messages', async () => {
+    const messages = new Map<string, any[]>();
+    const store = createModelSwitchStore({
+      bridge_default_model: 'gpt-5.4',
+    }) as any;
+    
+    store.addMessage = (sessionId: string, role: string, content: string) => {
+      const list = messages.get(sessionId) || [];
+      list.push({ role, content });
+      messages.set(sessionId, list);
+    };
+    
+    store.getMessages = (sessionId: string) => ({
+      messages: messages.get(sessionId) || [],
+    });
+    
+    store.clearSessionMessages = (sessionId: string) => {
+      messages.delete(sessionId);
+    };
+    
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue('data: {"type":"text","data":"ok"}\n');
+            controller.enqueue('data: {"type":"result","usage":{"input_tokens":1,"output_tokens":1},"is_error":false}\n');
+            controller.close();
+          },
+        }),
+      },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const sentMessages: OutboundMessage[] = [];
+    const adapter = createCommandTestAdapter(sentMessages);
+
+    // First message to establish a session
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-1',
+      address: { channelType: 'discord', chatId: 'chat-new-cmd', userId: 'user-1' },
+      text: 'hello',
+      timestamp: Date.now(),
+    });
+
+    const oldBinding = store.getChannelBinding('discord', 'chat-new-cmd');
+    assert.ok(oldBinding, 'Should have created initial binding');
+    const oldSessionId = oldBinding!.codepilotSessionId;
+
+    // Add some messages to the old session
+    store.addMessage(oldSessionId, 'user', 'First message');
+    store.addMessage(oldSessionId, 'assistant', 'First response');
+
+    const oldMessages = store.getMessages(oldSessionId);
+    assert.equal(oldMessages.messages.length, 4, 'Should have 4 messages in old session (2 from hello + 2 manually added)');
+
+    // Now send /new command
+    sentMessages.length = 0;
+    await _testOnly.handleMessage(adapter, {
+      messageId: 'msg-new',
+      address: { channelType: 'discord', chatId: 'chat-new-cmd', userId: 'user-1' },
+      text: '/new',
+      timestamp: Date.now(),
+    });
+
+    // New binding should be created
+    const newBinding = store.getChannelBinding('discord', 'chat-new-cmd');
+    assert.ok(newBinding, 'Should have new binding');
+    assert.notEqual(newBinding!.codepilotSessionId, oldSessionId, 'New session ID should be different');
+
+    // New session should have no messages
+    const newMessages = store.getMessages(newBinding!.codepilotSessionId);
+    assert.equal(newMessages.messages.length, 0, 'New session should have 0 messages');
+
+    // Response should indicate success
+    assert.match(sentMessages[0].text || '', /New session created/);
+  });
+});

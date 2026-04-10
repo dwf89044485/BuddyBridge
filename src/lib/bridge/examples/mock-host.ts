@@ -149,6 +149,13 @@ class InMemoryStore implements BridgeStore {
   listPendingPermissionLinksByChat() { return []; }
   getChannelOffset() { return '0'; }
   setChannelOffset() {}
+  clearSessionMessages() {
+    // Mock: no-op
+  }
+  deleteSession() {
+    // Mock: no-op, return true to indicate 'deleted'
+    return true;
+  }
 }
 
 // ── Echo LLM (returns user input as response) ───────────────
