@@ -139,6 +139,13 @@ class InMemoryConversationStore implements BridgeStore {
   listPendingPermissionLinksByChat() { return []; }
   getChannelOffset(): string { return '0'; }
   setChannelOffset(): void {}
+  clearSessionMessages() {
+    // Mock: no-op
+  }
+  deleteSession() {
+    // Mock: no-op, return true to indicate 'deleted'
+    return true;
+  }
 }
 
 describe('conversation-engine scoped prompts', () => {

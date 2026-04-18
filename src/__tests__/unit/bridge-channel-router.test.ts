@@ -136,6 +136,13 @@ function createMockStore(): BridgeStore & { bindings: Map<string, ChannelBinding
     listPendingPermissionLinksByChat() { return []; },
     getChannelOffset() { return '0'; },
     setChannelOffset() {},
+    clearSessionMessages() {
+      // Mock: no-op
+    },
+    deleteSession() {
+      // Mock: no-op, return true to indicate 'deleted'
+      return true;
+    },
   };
 }
 

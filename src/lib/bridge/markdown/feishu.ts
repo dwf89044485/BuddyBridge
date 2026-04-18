@@ -346,8 +346,8 @@ export function buildStatusCard(
 }
 
 export function buildModeCard(currentMode: string): Record<string, unknown> {
-  const modes = ['plan', 'code', 'ask', 'bypass'] as const;
-  const modeLabels: Record<string, string> = { plan: '📋 Plan', code: '💻 Code', ask: '💬 Ask', bypass: '🔓 Bypass' };
+  const modes = ['plan', 'code', 'ask'] as const;
+  const modeLabels: Record<string, string> = { plan: '📋 Plan', code: '💻 Code', ask: '💬 Ask' };
 
   const buttons = modes.map((mode) => ({
     tag: 'button' as const,

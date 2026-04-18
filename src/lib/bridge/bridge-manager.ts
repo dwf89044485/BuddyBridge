@@ -152,7 +152,6 @@ const MODE_MENU_OPTIONS: ModelOption[] = [
   { label: '📋 Plan', value: 'plan', description: '规划优先' },
   { label: '💻 Code', value: 'code', description: '编码优先' },
   { label: '💬 Ask', value: 'ask', description: '问答优先' },
-  { label: '🔓 Bypass', value: 'bypass', description: '跳过权限检查' },
 ];
 
 const RUNTIME_MENU_OPTIONS: ModelOption[] = [
@@ -1543,7 +1542,7 @@ async function handleCommand(
       if (args) {
         if (!validateMode(args)) {
           response = [
-            '请指定模式：plan、code、ask 或 bypass',
+            '请指定模式：plan、code 或 ask',
             '',
             '示例：<code>/mode code</code>',
           ].join('\n');
@@ -1581,7 +1580,7 @@ async function handleCommand(
         };
       } else {
         response = [
-          '请指定模式：plan、code、ask 或 bypass',
+          '请指定模式：plan、code 或 ask',
           '',
           '示例：<code>/mode code</code>',
         ].join('\n');

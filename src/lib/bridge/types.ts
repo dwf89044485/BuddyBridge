@@ -148,7 +148,7 @@ export interface ChannelBinding {
   /** Model override for this binding */
   model: string;
   /** Chat mode */
-  mode: 'code' | 'plan' | 'ask' | 'bypass';
+  mode: 'code' | 'plan' | 'ask';
   /** Current runtime/provider in use */
   runtime?: string;
   /** Optional active scope key, e.g. discord:thread:123 */
